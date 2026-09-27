@@ -152,6 +152,18 @@ Emitted when the admin extends an existing funding deadline while the escrow is 
 }
 ```
 
+### `FundingDeadlineUpdated`
+Emitted when the admin sets or removes the optional funding deadline. Unlike
+`FundingDeadlineExtended`, this event may represent setting the first deadline or clearing it.
+
+**Topics:**
+1. `fund_dl` (Symbol)
+2. `invoice_id` (Symbol)
+
+**Data Payload:**
+- `prior_deadline` (`Option<u64>`): previously configured deadline, if any.
+- `new_deadline` (`Option<u64>`): updated deadline, or `None` when removed.
+
 ### `InvestorAllowlistChanged`
 Emitted when an admin adds or removes an investor from the allowlist. This event is
 emitted per-address even when the change is performed via the batch entrypoint

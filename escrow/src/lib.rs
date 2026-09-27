@@ -2236,6 +2236,40 @@ pub struct FundingDeadlineExtended {
 }
 
 #[contractevent]
+pub struct FundingDeadlineUpdated {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub prior_deadline: Option<u64>,
+    pub new_deadline: Option<u64>,
+}
+
+#[contractevent]
+pub struct CallbackRegisteredEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
+}
+
+#[contractevent]
+pub struct CallbackExecutedEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
+}
+
+#[contractevent]
 pub struct LegalHoldChanged {
     #[topic]
     pub name: Symbol,
@@ -2580,45 +2614,9 @@ pub struct ContractUpgraded {
     pub new_wasm_hash: BytesN<32>,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CollateralPledge {
-    pub invoice_id: Symbol,
-    pub amount: i128,
-}
-
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
-
-/// Emitted by clear_sme_collateral_commitment when a pledge is retired.
-///
-/// `amount` carries the value from the removed pledge record.
-#[contractevent(topics = ["collateral_cleared"])]
-pub struct CollateralClearedEvt {
-    #[topic]
-    pub invoice_id: Symbol,
-    /// The amount that was recorded in the retired pledge.
-    pub amount: i128,
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn load_escrow(env: &Env) -> Result<InvoiceEscrow, EscrowError> {
-    env.storage()
-        .instance()
-        .get(&DataKey::Escrow)
-        .ok_or(EscrowError::EscrowNotInitialized)
-}
-
-/// Load escrow and require the caller to be the SME address.
-fn load_escrow_require_sme(env: &Env) -> Result<InvoiceEscrow, EscrowError> {
-    let escrow = load_escrow(env)?;
-    escrow.sme_address.require_auth();
-    Ok(escrow)
-}
 
 // ---------------------------------------------------------------------------
 // Contract
@@ -3546,29 +3544,6 @@ impl StarfundEscrow {
     /// 1. Read-only existence check ΓÇö returns [`EscrowError::NoCollateralToClear`] if absent.
     /// 2. `require_auth` on the SME address.
     /// 3. Remove storage entry and emit [`CollateralClearedEvt`].
-    pub fn clear_sme_collateral_commitment(env: Env) -> Result<(), EscrowError> {
-        // 1. Read-only existence check (no auth yet).
-        let pledge: CollateralPledge = env
-            .storage()
-            .instance()
-            .get(&DataKey::SmeCollateralPledge)
-            .ok_or(EscrowError::NoCollateralToClear)?;
-
-        // 2. Load escrow and require SME auth.
-        let escrow = load_escrow_require_sme(&env)?;
-
-        // 3. Remove entry and emit retirement event.
-        env.storage()
-            .instance()
-            .remove(&DataKey::SmeCollateralPledge);
-        CollateralClearedEvt {
-            invoice_id: escrow.invoice_id,
-            amount: pledge.amount,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
     /// Returns the remaining funding capacity before the funding target is reached.
     ///
     /// The remaining capacity is calculated as `funding_target - funded_amount`.
@@ -5675,6 +5650,7 @@ impl StarfundEscrow {
     pub fn set_investor_allowlisted(env: Env, investor: Address, allowed: bool, expected_nonce: u32) {
         let escrow = Self::load_escrow_require_admin(&env);
         Self::consume_admin_nonce(&env, expected_nonce);
+        let was_allowlisted = Self::is_investor_allowlisted(env.clone(), investor.clone());
         env.storage()
             .persistent()
             .set(&DataKey::InvestorAllowlisted(investor.clone()), &allowed);
@@ -6674,7 +6650,7 @@ impl StarfundEscrow {
         #[cfg(any(test, feature = "testutils"))]
         register_mock_token_if_needed(&env, &token_addr);
 
-        external_calls::transfer_into_escrow_with_balance_checks(
+        external_calls::transfer_funding_token_inbound_with_balance_checks(
             &env,
             &token_addr,
             &investor,
