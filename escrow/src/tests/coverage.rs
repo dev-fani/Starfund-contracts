@@ -883,7 +883,7 @@ fn test_update_maturity_not_open() {
 
     let investor = Address::generate(&env);
     client.fund(&investor, &100);
-    client.update_maturity(&200);
+    client.update_maturity(&200, &0u32);
 }
 
 #[test]

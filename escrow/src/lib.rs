@@ -908,6 +908,8 @@ pub enum EscrowError {
     /// [`StarfundEscrow::update_yield_bps`] received a `new_yield_bps` equal to the current value.
     /// No-op updates are rejected to prevent spurious events and unnecessary storage writes.
     YieldBpsUnchanged = 229,
+    /// [`StarfundEscrow::update_yield_bps`] called after investors have already funded principal.
+    YieldBpsUpdateFunded = 230,
     /// [`StarfundEscrow::set_storage_limit`] received a non-positive limit.
     StorageLimitNotPositive = 232,
     /// [`StarfundEscrow::set_storage_limit`] received a limit outside allowed range.
@@ -2120,15 +2122,6 @@ pub struct YieldBpsUpdatedEvent {
     pub invoice_id: Symbol,
     pub old_yield_bps: i64,
     pub new_yield_bps: i64,
-}
-
-#[contractevent]
-pub struct AdminTransferredEvent {
-    #[topic]
-    pub name: Symbol,
-    #[topic]
-    pub invoice_id: Symbol,
-    pub new_admin: Address,
 }
 
 #[contractevent]
@@ -7450,8 +7443,24 @@ impl StarfundEscrow {
             .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
     }
 
-    pub fn update_maturity(env: Env, new_maturity: u64) -> InvoiceEscrow {
+    /// Admin-only setter for the invoice maturity timestamp.
+    ///
+    /// Updates [`InvoiceEscrow::maturity`] to `new_maturity`. Only valid while the
+    /// escrow is in **open** status (`status == 0`).
+    ///
+    /// # Authorization
+    /// Requires admin authorization and consumes an admin nonce (`expected_nonce`).
+    ///
+    /// # Errors
+    /// - [`EscrowError::AdminNonceMismatch`] if `expected_nonce` does not match the stored admin nonce.
+    /// - [`EscrowError::MaturityUpdateNotOpen`] if escrow status is not open (`0`).
+    /// - [`EscrowError::MaturityUnchanged`] if `new_maturity` equals the current maturity.
+    /// - [`EscrowError::MaturityInPast`] if `new_maturity` is in the past and non-zero.
+    /// - [`EscrowError::MaturityExceedsMaxHorizon`] if `new_maturity` exceeds current max horizon.
+    /// - [`EscrowError::FundingDeadlineAtOrAfterMaturity`] if a funding deadline is configured and `new_maturity <= deadline`.
+    pub fn update_maturity(env: Env, new_maturity: u64, expected_nonce: u32) -> InvoiceEscrow {
         let mut escrow = Self::load_escrow_require_admin(&env);
+        Self::consume_admin_nonce(&env, expected_nonce);
 
         guard_status_eq(&env, escrow.status, 0, EscrowError::MaturityUpdateNotOpen);
 
@@ -7467,6 +7476,14 @@ impl StarfundEscrow {
             .get::<DataKey, u64>(&DataKey::MaturityMaxHorizon)
             .unwrap_or(DEFAULT_MATURITY_MAX_HORIZON_SECS);
         validate_maturity_bounds(&env, new_maturity, max_horizon);
+
+        if let Some(deadline) = env.storage().instance().get(&keys::funding_deadline()) {
+            ensure(
+                &env,
+                deadline < new_maturity,
+                EscrowError::FundingDeadlineAtOrAfterMaturity,
+            );
+        }
 
         let old_maturity = escrow.maturity;
         escrow.maturity = new_maturity;
@@ -7500,9 +7517,10 @@ impl StarfundEscrow {
     /// Requires the signature of the current [`InvoiceEscrow::admin`].
     ///
     /// # Errors
-    /// - [`EscrowError::YieldBpsUpdateNotOpen`] ΓÇö escrow is not in open status.
-    /// - [`EscrowError::YieldBpsOutOfRange`] ΓÇö `new_yield_bps` is outside `0..=10_000`.
-    /// - [`EscrowError::YieldBpsUnchanged`] ΓÇö `new_yield_bps` equals the current value.
+    /// - [`EscrowError::YieldBpsUpdateNotOpen`] — escrow is not in open status.
+    /// - [`EscrowError::YieldBpsUpdateFunded`] — escrow has already received funding.
+    /// - [`EscrowError::YieldBpsOutOfRange`] — `new_yield_bps` is outside `0..=10_000`.
+    /// - [`EscrowError::YieldBpsUnchanged`] — `new_yield_bps` equals the current value.
     ///
     /// # Events
     /// Emits [`YieldBpsUpdatedEvent`] with `invoice_id`, `old_yield_bps`, and `new_yield_bps`.
@@ -7513,6 +7531,12 @@ impl StarfundEscrow {
         let mut escrow = Self::load_escrow_require_admin(&env);
 
         guard_status_eq(&env, escrow.status, 0, EscrowError::YieldBpsUpdateNotOpen);
+
+        ensure(
+            &env,
+            escrow.funded_amount == 0,
+            EscrowError::YieldBpsUpdateFunded,
+        );
 
         ensure(
             &env,
@@ -7925,7 +7949,7 @@ impl StarfundEscrow {
     /// - [`EscrowError::AdminProposalExpired`] if the proposal's validity window has passed.
     ///
     /// # Events
-    /// Emits [`AdminTransferredEvent`] (topic: `admin`) containing the `invoice_id` and the `new_admin` address.
+    /// Emits [`AdminAcceptedEvent`] (topic: `adm_acc`) containing the `invoice_id`, `prior_admin`, and `new_admin` address.
     pub fn accept_admin(env: Env) -> InvoiceEscrow {
         let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         ensure(&env, pending.is_some(), EscrowError::NoPendingAdmin);
