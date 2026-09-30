@@ -706,6 +706,10 @@ pub enum EscrowError {
     NewCapNotHigher = 176,
     /// [`StarfundEscrow::lower_max_unique_investors`] set cap below current unique funder count.
     NewCapBelowCurrentFunderCount = 78,
+    /// [`StarfundEscrow::raise_min_contribution_floor`] called while escrow is not open.
+    FloorRaiseNotOpen = 178,
+    /// [`StarfundEscrow::raise_min_contribution_floor`] did not strictly raise the floor.
+    NewFloorNotHigher = 179,
     /// [`StarfundEscrow::update_maturity`] called while escrow is not open.
     MaturityUpdateNotOpen = 79,
     /// [`StarfundEscrow::propose_admin`] nominated the current admin address.
@@ -1814,6 +1818,30 @@ pub struct RentBumpEntry {
     pub contribution_ttl: u32,
 }
 
+/// A single row returned by [`StarfundEscrow::get_funding_records`].
+///
+/// Replaces the previous bare `(Address, i128)` tuple so client SDKs (TypeScript,
+/// Python, …) generate named field accessors (`record.investor`,
+/// `record.contribution`) instead of positional ones (`record[0]`, `record[1]`).
+///
+/// # Fields
+/// - `investor`: The investor address this record describes.
+/// - `contribution`: That investor's currently recorded principal contribution,
+///   read from persistent storage at call time.
+///
+/// # Guarantee
+/// `contribution` is always strictly positive: investors who have fully
+/// [`StarfundEscrow::unfund`]ed (or been fully refunded) still occupy a slot in
+/// [`DataKey::InvestorIndex`] but are filtered out of this view.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FundingRecord {
+    /// The investor address this record describes.
+    pub investor: Address,
+    /// The investor's active principal contribution (always `> 0`).
+    pub contribution: i128,
+}
+
 /// Typed return value from [`StarfundEscrow::settle`].
 ///
 /// Replaces the previous opaque tuple / raw [`InvoiceEscrow`] return with a
@@ -1937,6 +1965,16 @@ pub struct MaxUniqueInvestorsCapRaised {
 
 #[contractevent]
 pub struct MinContributionFloorLowered {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_floor: i128,
+    pub new_floor: i128,
+}
+
+#[contractevent]
+pub struct MinContributionFloorRaised {
     #[topic]
     pub name: Symbol,
     #[topic]
@@ -4283,33 +4321,46 @@ impl StarfundEscrow {
 
     /// Enumerate all funding records (investor address + contribution amount) with pagination.
     ///
-    /// Returns a paginated view of all investor funding records. Each record is a tuple of
-    /// (investor address, principal contribution amount in base units of the funding token).
-    /// The records are returned in the order they appear in the internal investor index.
+    /// Returns a paginated view of the escrow's active funding records. Each record is a typed
+    /// [`FundingRecord`] carrying the investor address and their principal contribution in base
+    /// units of the funding token. Records are returned in the order they appear in the internal
+    /// investor index.
     ///
     /// This is a read-only view with no state mutation. If zero funding records exist,
     /// or if `start` is beyond the last record, returns an empty vector.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `start` - Zero-based starting index for pagination.
-    /// * `limit` - Maximum number of records to return.
+    /// * `start` - Zero-based starting index into the investor index.
+    /// * `limit` - Maximum number of investor-index slots to scan.
     ///   If `limit` exceeds [`MAX_INVESTOR_READ_BATCH`] (50), it is silently clamped to the ceiling.
     ///
     /// # Returns
-    /// A `Vec<(Address, i128)>` where each tuple is an investor address and their cumulative
-    /// principal contribution. Returns an empty vector if:
+    /// A `Vec<FundingRecord>` of active investors and their cumulative principal contribution.
+    /// Returns an empty vector if:
     /// - No funding records exist (escrow has zero investors).
     /// - `start` is at or beyond the total record count.
     /// - `limit` is zero.
     ///
+    /// # Active-participant filtering
+    /// An investor whose contribution has been fully withdrawn (via
+    /// [`StarfundEscrow::unfund`] while the escrow is open, or via
+    /// [`StarfundEscrow::refund`] once cancelled) keeps its slot in
+    /// [`DataKey::InvestorIndex`] — the index is append-only so stored record offsets stay
+    /// stable — but their recorded contribution is `0`. Such slots are **skipped**: every
+    /// returned record has `contribution > 0`, so callers see only active participants.
+    ///
+    /// Because the scan window is defined over investor-index slots (not over the filtered
+    /// result), a page may legitimately return **fewer** records than `limit` even when more
+    /// active investors exist later in the index. A short page is therefore *not* a reliable
+    /// end-of-records signal on its own.
+    ///
     /// # Pagination and Continuation
     /// To iterate through all records, the caller should:
     /// 1. Call with `start=0, limit=50` (or any value up to the ceiling).
-    /// 2. The returned vector length (e.g., 50) indicates the number of records in this page.
-    /// 3. Next call uses `start = previous_start + items_returned.len()`.
-    /// 4. Stop when the returned vector is shorter than requested (indicates end of records)
-    ///    or is empty.
+    /// 2. Advance using the number of investor-index slots scanned (`limit`), **not** the
+    ///    returned vector length.
+    /// 3. Stop when the returned vector is empty.
     ///
     /// # Example
     /// ```ignore
@@ -4319,11 +4370,14 @@ impl StarfundEscrow {
     ///     if page.is_empty() {
     ///         break; // No more records
     ///     }
-    ///     // Process page...
-    ///     start += page.len() as u32;
+    ///     for record in page.iter() {
+    ///         // Self-documenting named fields instead of positional tuple access.
+    ///         log!(record.investor, record.contribution);
+    ///     }
+    ///     start += 50;
     /// }
     /// ```
-    pub fn get_funding_records(env: Env, start: u32, limit: u32) -> Vec<(Address, i128)> {
+    pub fn get_funding_records(env: Env, start: u32, limit: u32) -> Vec<FundingRecord> {
         let index: Vec<Address> = env
             .storage()
             .instance()
@@ -4342,7 +4396,16 @@ impl StarfundEscrow {
         for i in start..end {
             let investor = index.get(i).unwrap();
             let contribution = Self::get_persistent_investor_contribution(&env, investor.clone());
-            result.push_back((investor, contribution));
+            // Fully unfunded / refunded investors keep an index slot but hold no principal.
+            // Reporting them as `(investor, 0)` would misreport them as participants, so
+            // only active investors with a positive contribution are returned.
+            if contribution <= 0 {
+                continue;
+            }
+            result.push_back(FundingRecord {
+                investor,
+                contribution,
+            });
         }
         result
     }
@@ -6076,6 +6139,62 @@ impl StarfundEscrow {
         new_cap
     }
 
+    /// Raise the minimum contribution floor while the escrow is still open.
+    ///
+    /// Admin-only counterpart to [`StarfundEscrow::lower_min_contribution_floor`]. The new floor
+    /// applies to all subsequent [`StarfundEscrow::fund`] /
+    /// [`StarfundEscrow::fund_with_commitment`] calls, including follow-on deposits from existing
+    /// investors.
+    ///
+    /// # Upper bound
+    /// `new_floor` may never exceed [`InvoiceEscrow::funding_target`]. Mirroring the bound enforced
+    /// at [`StarfundEscrow::init`] (`min_contribution <= amount`, where `amount` seeds
+    /// `funding_target`), a floor above the target would make the escrow permanently unfundable:
+    /// every deposit that satisfies the floor would also overshoot the target, so no investor
+    /// could ever fund. The check reuses [`EscrowError::MinContributionExceedsAmount`] so callers
+    /// see the same error they already handle for the init-time bound.
+    ///
+    /// # Errors
+    /// - [`EscrowError::FloorRaiseNotOpen`] if the escrow is not open (status != 0).
+    /// - [`EscrowError::NewFloorNotPositive`] if `new_floor` is not positive.
+    /// - [`EscrowError::NewFloorNotHigher`] if `new_floor` is not strictly above the current floor.
+    /// - [`EscrowError::MinContributionExceedsAmount`] if `new_floor` exceeds `funding_target`.
+    pub fn raise_min_contribution_floor(env: Env, new_floor: i128) -> i128 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        guard_status_eq(&env, escrow.status, 0, EscrowError::FloorRaiseNotOpen);
+        ensure(&env, new_floor > 0, EscrowError::NewFloorNotPositive);
+
+        let old_floor: i128 = env
+            .storage()
+            .instance()
+            .get(&keys::min_contribution_floor())
+            .unwrap_or(0);
+        ensure(&env, new_floor > old_floor, EscrowError::NewFloorNotHigher);
+
+        // A floor above the funding target can never be satisfied without overshooting the
+        // target, which would brick funding for the rest of the escrow's open lifetime.
+        ensure(
+            &env,
+            new_floor <= escrow.funding_target,
+            EscrowError::MinContributionExceedsAmount,
+        );
+
+        env.storage()
+            .instance()
+            .set(&keys::min_contribution_floor(), &new_floor);
+
+        MinContributionFloorRaised {
+            name: symbol_short!("floor_ra"),
+            invoice_id: escrow.invoice_id.clone(),
+            old_floor,
+            new_floor,
+        }
+        .publish(&env);
+
+        new_floor
+    }
+
     /// Lower the minimum contribution floor while the escrow is still open.
     ///
     /// This is admin-only and intentionally cannot raise the floor or set a non-positive
@@ -6946,20 +7065,24 @@ impl StarfundEscrow {
             EscrowError::InsufficientContractBalance,
         );
 
+        // Increase DistributedPrincipal by `amount` to account for principal leaving the escrow.
+        // Done once, before the final/partial branch, so both release paths record the same
+        // accounting effect: `DistributedPrincipal` always equals the total principal disbursed
+        // to the SME across `release` and `withdraw`, which is what `sweep_terminal_dust` relies on
+        // for its `outstanding = funded_amount - distributed` liability floor.
+        let prev_distributed: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DistributedPrincipal)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::DistributedPrincipal,
+            &prev_distributed.saturating_add(amount),
+        );
+
         if is_final {
             next_escrow.status = 3;
             env.storage().instance().set(&DataKey::Escrow, &next_escrow);
-
-            // Increase DistributedPrincipal by `amount` to account for funds leaving.
-            let prev_distributed: i128 = env
-                .storage()
-                .instance()
-                .get(&DataKey::DistributedPrincipal)
-                .unwrap_or(0);
-            env.storage().instance().set(
-                &DataKey::DistributedPrincipal,
-                &prev_distributed.saturating_add(amount),
-            );
 
             FinalRelease {
                 name: symbol_short!("fin_rel"),
@@ -6969,16 +7092,6 @@ impl StarfundEscrow {
             }
             .publish(&env);
         } else {
-            let prev_distributed: i128 = env
-                .storage()
-                .instance()
-                .get(&DataKey::DistributedPrincipal)
-                .unwrap_or(0);
-            env.storage().instance().set(
-                &DataKey::DistributedPrincipal,
-                &prev_distributed.saturating_add(amount),
-            );
-
             PartialRelease {
                 name: symbol_short!("part_rel"),
                 invoice_id: escrow.invoice_id.clone(),

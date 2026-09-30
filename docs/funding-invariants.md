@@ -59,6 +59,11 @@ if floor > 0: amount >= floor
 **Related entrypoints:**
 - `lower_min_contribution_floor` — admin-only; only accepts a strictly smaller positive value;
   only valid in status 0 (`EscrowError::FloorLowerNotOpen` = 173)
+- `raise_min_contribution_floor` — admin-only; only accepts a strictly larger positive value;
+  only valid in status 0 (`EscrowError::FloorRaiseNotOpen` = 178). The new floor is additionally
+  bounded by `escrow.funding_target` (`EscrowError::MinContributionExceedsAmount` = 7): a floor
+  above the target would make the escrow permanently unfundable, because every deposit that met
+  the floor would also overshoot the target. This mirrors the bound enforced at `init`.
 
 ---
 
