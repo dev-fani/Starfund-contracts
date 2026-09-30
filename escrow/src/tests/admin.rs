@@ -4099,3 +4099,45 @@ fn test_pending_admin_remaining_consistent_with_accept_admin() {
     assert_eq!(client.get_pending_admin_remaining_secs(), Some(0));
     assert_contract_error(client.try_accept_admin(), EscrowError::AdminProposalExpired);
 }
+
+#[test]
+fn test_set_storage_limit_nonce_replay_and_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    let old_limit = client.get_storage_limit();
+
+    // Invalid nonce reverts with AdminNonceMismatch
+    assert_contract_error(
+        client.try_set_storage_limit(&10_000u32, &999u32),
+        EscrowError::AdminNonceMismatch,
+    );
+
+    // Valid nonce 0 succeeds
+    let new_limit = 20_000u32;
+    let res = client.set_storage_limit(&new_limit, &0u32);
+    assert_eq!(res, new_limit);
+    assert_eq!(client.get_storage_limit(), new_limit);
+
+    // Replaying nonce 0 fails
+    assert_contract_error(
+        client.try_set_storage_limit(&new_limit, &0u32),
+        EscrowError::AdminNonceMismatch,
+    );
+
+    // Verify StorageLimitUpdatedEvent was emitted
+    let contract_id = client.address.clone();
+    let all_events = env.events().all();
+    assert_eq!(
+        all_events.events().last().unwrap().clone(),
+        crate::StorageLimitUpdatedEvent {
+            name: symbol_short!("stg_lim"),
+            invoice_id: client.get_escrow().invoice_id,
+            old_limit,
+            new_limit,
+        }
+        .to_xdr(&env, &contract_id)
+    );
+}

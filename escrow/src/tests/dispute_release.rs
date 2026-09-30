@@ -130,3 +130,17 @@ fn unauthorized_dispute_close_panics() {
     let err = client.try_close_dispute(&outsider, &true);
     assert_contract_error(err, EscrowError::Unauthorized);
 }
+
+#[test]
+fn cancel_funding_during_dispute_is_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
+
+    client.open_dispute(&admin);
+    assert!(client.is_dispute_active());
+
+    let result = client.try_cancel_funding(&0u32);
+    assert_contract_error(result, EscrowError::DisputeBlocksCancelFunding);
+}

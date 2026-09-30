@@ -3770,3 +3770,44 @@ fn update_yield_bps_reflected_in_settlement_config() {
     let config = client.get_settlement_config();
     assert_eq!(config.yield_bps, 750i64);
 }
+
+// ── issue #87 & issue #88 tests ──────────────────────────────────────────────
+
+/// Fully release funds via `release()`, then call `withdraw()`. Assert it reverts with `NothingToWithdraw`.
+#[test]
+fn test_withdraw_after_full_release_reverts_nothing_to_withdraw() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
+
+    // Fully release the entire funded amount
+    client.release(&TARGET);
+
+    // Attempting to withdraw when remaining amount is 0 must revert with NothingToWithdraw
+    assert_contract_error(client.try_withdraw(), EscrowError::NothingToWithdraw);
+}
+
+/// Settle 3 mature escrows via `settle_batch` without requiring SME signatures.
+#[test]
+fn test_settle_batch_settles_three_mature_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client1, _sme1, _sac1) = setup_funded_with_token(&env);
+    let (client2, _sme2, _sac2) = setup_funded_with_token(&env);
+    let (client3, _sme3, _sac3) = setup_funded_with_token(&env);
+
+    let batch_escrow_id = env.register(StarfundEscrow, ());
+    let batch_client = super::StarfundEscrowClient::new(&env, &batch_escrow_id);
+
+    let mut escrows = SorobanVec::new(&env);
+    escrows.push_back(client1.address.clone());
+    escrows.push_back(client2.address.clone());
+    escrows.push_back(client3.address.clone());
+
+    batch_client.settle_batch(&escrows);
+
+    assert_eq!(client1.get_escrow().status, 2u32);
+    assert_eq!(client2.get_escrow().status, 2u32);
+    assert_eq!(client3.get_escrow().status, 2u32);
+}

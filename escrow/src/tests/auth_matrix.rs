@@ -193,36 +193,15 @@ fn test_partial_settle_no_auth_panics() {
 
 // ── settle ──────────────────────────────────────────────────────────────
 
-/// Calling `settle` with no authorization panics at the host-level
-/// `sme_address.require_auth()` inside `load_escrow_require_sme`.
+/// Once an escrow has reached maturity, settlement is permissionless (no auth required)
+/// to allow operators/admins to perform batch settlements without per-SME cross-contract signatures.
 #[test]
-#[should_panic]
-fn test_settle_no_auth_panics() {
+fn test_settle_permissionless_when_mature() {
     let env = Env::default();
     let (client, _admin, _sme, _investor, _treasury) = setup_funded(&env);
     env.mock_auths(&[]);
-    client.settle();
-}
-
-/// Calling `settle` with a non-SME signer panics at the host-level
-/// `require_auth` because `load_escrow_require_sme` demands the SME's
-/// signature.
-#[test]
-#[should_panic]
-fn test_settle_wrong_signer_panics() {
-    let env = Env::default();
-    let (client, _admin, _sme, _investor, _treasury) = setup_funded(&env);
-    let stranger = Address::generate(&env);
-    env.mock_auths(&[MockAuth {
-        address: &stranger,
-        invoke: &MockAuthInvoke {
-            contract: &client.address,
-            fn_name: "settle",
-            args: SorobanVec::new(&env),
-            sub_invokes: &[],
-        },
-    }]);
-    client.settle();
+    let result = client.settle();
+    assert_eq!(result.escrow.status, 2u32);
 }
 
 // ── withdraw ────────────────────────────────────────────────────────────
