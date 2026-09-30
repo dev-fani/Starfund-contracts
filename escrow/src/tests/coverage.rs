@@ -233,6 +233,7 @@ fn escrow_error_discriminants_match_canonical_table() {
         (EscrowError::LegalHoldClearRequestMissing, 150),
         (EscrowError::LegalHoldClearNotReady, 151),
         (EscrowError::LegalHoldClearDelayOverflow, 152),
+        (EscrowError::LegalHoldNotActive, 153),
         (EscrowError::LegalHoldBlocksBeneficiaryRotation, 160),
         (EscrowError::RotationNotOpen, 161),
         (EscrowError::NewSmeSameAsCurrent, 162),
@@ -242,7 +243,7 @@ fn escrow_error_discriminants_match_canonical_table() {
         (EscrowError::NewFloorNotLower, 174),
         (EscrowError::NewFloorNotPositive, 175),
     ];
-    assert_eq!(TABLE.len(), 89);
+    assert_eq!(TABLE.len(), 90);
     for (variant, code) in TABLE {
         assert_eq!(*variant as u32, *code, "discriminant drift for code {code}");
     }
