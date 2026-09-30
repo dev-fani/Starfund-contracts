@@ -83,7 +83,9 @@ Triggered when the escrow's recorded principal meets or exceeds the funding targ
 |------------|------|-------|-------|
 | `refund()` | investor | status == 4, legal hold inactive, contribution > 0 | Transfers investor contribution back, zeroes it (checks-effects-interactions). |
 
-`refund_batch()` follows the same entrypoint rules per entry.
+`refund_batch()` follows the same entrypoint rules per entry, except that entries with **zero
+recorded contribution** are skipped silently (batch mode) instead of reverting the whole batch
+with `NoContributionToRefund`. Already-refunded entries are skipped as well.
 
 ### 0 → 0 (Open remains Open)
 

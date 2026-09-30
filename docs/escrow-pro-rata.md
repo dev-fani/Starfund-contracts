@@ -120,6 +120,14 @@ Because floor division always gives `payout_i ≤ exact_i`, summing across all i
            ≤ total_principal × (1 + max_effective_yield_bps / 10_000)
 ```
 
+> ⚠️ **The base-yield pool is not the tier-weighted pool.** The single `settled_pool`
+> quoted above (`total_principal + total_principal × yield_bps / 10_000`) is only valid
+> when every investor shares the same effective yield. Under mixed tiers it is a **lower
+> bound** on the real liability, and repaying only that amount leaves the contract
+> under-funded for the last claimants. `get_settlement_pool()` therefore returns the
+> **exact tier-weighted sum** `Σ payout_i`, not the base-yield figure — see
+> [On-Chain Aggregate View](#-on-chain-aggregate-view-get_settlement_pool).
+
 ### Rounding guarantee
 
 Rounding always favors the contract, never the investors collectively:
@@ -187,13 +195,18 @@ StarfundEscrow::get_settlement_pool(env) → i128
 ```
 
 Returns the **total pool** the SME must repay to fully satisfy all investors, computed
-entirely on-chain from [`DataKey::FundingCloseSnapshot`] and the escrow's **base**
-`yield_bps`:
+entirely on-chain by enumerating the recorded investor set ([`DataKey::InvestorIndex`]) and
+summing each investor's own effective-yield payout:
 
 ```text
-coupon       = total_principal × yield_bps / 10_000  (floor)
-settle_pool  = total_principal + coupon
+settle_pool_i = total_principal + total_principal × effective_yield_bps_i / 10_000
+payout_i      = contribution_i × settle_pool_i / total_principal   (floor)
+
+get_settlement_pool() = Σ_i payout_i
 ```
+
+Each term is byte-for-byte the same floored integer `compute_investor_payout` returns, so the
+aggregate **cannot under-fund** any claim, no matter how the tiers are distributed.
 
 ### Why this view exists
 
@@ -202,12 +215,26 @@ dashboards previously had to re-derive `total_principal × yield_bps / 10_000` o
 risking a rounding divergence from the on-chain math. `get_settlement_pool` closes that gap
 by exposing the authoritative aggregate in a single host invocation.
 
-### Yield note
+### Yield note: base-yield pool vs. tier-weighted pool
 
-This view uses the escrow **base yield** (`InvoiceEscrow::yield_bps`). Per-investor
-effective yields from [`fund_with_commitment`] tier selection are reflected individually in
-`compute_investor_payout` but are **not** aggregated here. The result is therefore an
-authoritative lower-bound aggregate that avoids per-investor enumeration.
+`settle()` still computes its `settle_pool` (in both the `SettlementResult` return value and
+the `EscrowSettled` event payload) from the escrow **base yield** only:
+
+```text
+settle_pool = funded_amount + floor(funded_amount × yield_bps / 10_000)
+```
+
+That value is **informational**. For an escrow whose investors sit at different tiers it is a
+**lower bound** on the real liability. Repayment tooling must use `get_settlement_pool()` —
+never the `settle` return value — to determine how much the SME owes.
+
+When every investor shares the same effective yield, the two agree exactly (up to the
+sub-unit floor residue that `sweep_terminal_dust` reclaims).
+
+### Cost
+
+O(n) over [`DataKey::InvestorIndex`], which is hard-capped at `MAX_UNIQUE_INVESTORS` (10 000)
+by `fund_impl`. This is a read-only view and is not on the release path.
 
 ### Return value
 
@@ -215,7 +242,8 @@ authoritative lower-bound aggregate that avoids per-investor enumeration.
 |-----------|---------|
 | [`DataKey::FundingCloseSnapshot`] absent (escrow not yet funded) | `0` |
 | `total_principal <= 0` (degenerate snapshot) | `0` |
-| Normal funded state | `total_principal + floor(total_principal × yield_bps / 10_000)` |
+| No recorded investor (defensive fallback) | `total_principal + floor(total_principal × yield_bps / 10_000)` |
+| Funded state with investors | `Σ_i payout_i` (tier-weighted total liability) |
 
 ### Overflow safety
 

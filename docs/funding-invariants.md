@@ -57,13 +57,10 @@ if floor > 0: amount >= floor
 - `fund_batch` pre-validation loop — checks every entry for floor compliance before any `fund_impl` call
 
 **Related entrypoints:**
-- `lower_min_contribution_floor` — admin-only; only accepts a strictly smaller positive value;
-  only valid in status 0 (`EscrowError::FloorLowerNotOpen` = 173)
 - `raise_min_contribution_floor` — admin-only; only accepts a strictly larger positive value;
-  only valid in status 0 (`EscrowError::FloorRaiseNotOpen` = 178). The new floor is additionally
-  bounded by `escrow.funding_target` (`EscrowError::MinContributionExceedsAmount` = 7): a floor
-  above the target would make the escrow permanently unfundable, because every deposit that met
-  the floor would also overshoot the target. This mirrors the bound enforced at `init`.
+  only valid in status 0.
+- `lower_min_contribution_floor` — admin-only; only accepts a strictly smaller positive value;
+  only valid in status 0 (`EscrowError::FloorLowerNotOpen` = 250).
 
 ---
 
@@ -148,6 +145,8 @@ This is enforced across all deposit paths including follow-on deposits by the sa
 **Related entrypoints:**
 - `raise_max_per_investor` — admin-only; only accepts strictly larger value;
   requires the cap to have been configured at init (`EscrowError::MaxPerInvestorCapNotConfigured` = 24)
+- `lower_max_per_investor` — admin-only; requires a configured cap and a positive, strictly
+  smaller value; only valid while status is 0.
 
 ---
 
