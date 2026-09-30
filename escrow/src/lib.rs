@@ -645,6 +645,9 @@ pub enum EscrowError {
     /// Sweep would reduce the contract balance below outstanding investor liabilities.
     /// `balance - sweep_amt` must be `>= funded_amount - distributed_principal`.
     SweepExceedsLiabilityFloor = 42,
+    /// Token transfer wrapper rejected a self-transfer (`from == recipient`), which would
+    /// otherwise surface as a confusing sender/recipient delta mismatch.
+    SelfTransferNotAllowed = 43,
 
     /// [`StarfundEscrow::bind_primary_attestation_hash`] called when a primary hash exists.
     PrimaryAttestationAlreadyBound = 50,
@@ -6539,10 +6542,10 @@ impl StarfundEscrow {
             }
         } else {
             ensure(&env, prev == 0, EscrowError::TieredSecondDeposit);
-            let (eff, lock) =
+            let resolution =
                 Self::effective_yield_for_commitment(&env, escrow.yield_bps, committed_lock_secs);
-            investor_effective_yield_bps = eff;
-            tier_lock_secs = lock;
+            investor_effective_yield_bps = resolution.effective_yield_bps;
+            tier_lock_secs = resolution.matched_lock_secs;
             let now = env.ledger().timestamp();
             claim_nb = if committed_lock_secs == 0 {
                 0u64

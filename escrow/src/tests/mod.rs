@@ -61,9 +61,8 @@ mod admin;
 mod attestations;
 mod auth_matrix;
 mod cap_validation;
-// mod collateral_boundary_tests; // file not present in this tree
-// mod collateral_config_view;    // file not present in this tree
-// mod collateral_limit_setter;   // file not present in this tree
+// The collateral (boundary/config-view/limit-setter), settlement_limit, and admin_recovery test
+// modules have no source file in this tree, so they are intentionally not declared here.
 mod dispute_release;
 #[rustfmt::skip]
 mod coverage;
@@ -85,9 +84,7 @@ mod properties;
 mod reconciliation_lifecycle;
 mod settlement;
 mod settlement_config_view;
-// mod settlement_limit; // file not present in this tree
 mod yield_tier_boundaries;
-// mod admin_recovery;  // file not present in this tree
 mod decimal_scale_tests;
 mod release_tests;
 

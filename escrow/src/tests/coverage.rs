@@ -182,6 +182,7 @@ fn escrow_error_discriminants_match_canonical_table() {
         (EscrowError::SenderBalanceDeltaMismatch, 40),
         (EscrowError::RecipientBalanceDeltaMismatch, 41),
         (EscrowError::SweepExceedsLiabilityFloor, 42),
+        (EscrowError::SelfTransferNotAllowed, 43),
         (EscrowError::PrimaryAttestationAlreadyBound, 50),
         (EscrowError::AttestationAppendLogCapacityReached, 51),
         (EscrowError::CollateralAmountNotPositive, 60),
@@ -242,7 +243,7 @@ fn escrow_error_discriminants_match_canonical_table() {
         (EscrowError::NewFloorNotLower, 174),
         (EscrowError::NewFloorNotPositive, 175),
     ];
-    assert_eq!(TABLE.len(), 89);
+    assert_eq!(TABLE.len(), 90);
     for (variant, code) in TABLE {
         assert_eq!(*variant as u32, *code, "discriminant drift for code {code}");
     }
