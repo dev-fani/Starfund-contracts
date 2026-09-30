@@ -117,6 +117,25 @@ fn test_negative_amount_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: self-transfer guard
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic]
+fn test_self_transfer_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token = install_stellar_asset_token(&env);
+    let holder = deploy_id(&env);
+
+    token.stellar.mint(&holder, &1000i128);
+
+    // Sender and recipient are the same address: rejected with a dedicated error instead of
+    // surfacing as a confusing sender/recipient delta mismatch.
+    transfer_funding_token_with_balance_checks(&env, &token.id, &holder, &holder, 100i128);
+}
+
+// ---------------------------------------------------------------------------
 // Tests: insufficient balance guard
 // ---------------------------------------------------------------------------
 

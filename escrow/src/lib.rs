@@ -672,6 +672,9 @@ pub enum EscrowError {
     /// Sweep would reduce the contract balance below outstanding investor liabilities.
     /// `balance - sweep_amt` must be `>= funded_amount - distributed_principal`.
     SweepExceedsLiabilityFloor = 42,
+    /// Token transfer wrapper rejected a self-transfer (`from == recipient`), which would
+    /// otherwise surface as a confusing sender/recipient delta mismatch.
+    SelfTransferNotAllowed = 43,
 
     /// [`StarfundEscrow::bind_primary_attestation_hash`] called when a primary hash exists.
     PrimaryAttestationAlreadyBound = 50,

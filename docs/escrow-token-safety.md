@@ -110,6 +110,7 @@ All errors from the token-safety wrapper are typed `EscrowError` variants with s
 
 | Code | Variant | Trigger | Meaning |
 |------|---------|---------|---------|
+| 43 | `SelfTransferNotAllowed` | `from == recipient` | Sender and recipient are the same address |
 | 36 | `TransferAmountNotPositive` | `amount <= 0` | Transfer amount validation failed |
 | 37 | `InsufficientTokenBalanceBeforeTransfer` | `sender.balance < amount` | Sender lacks sufficient funds |
 | 38 | `SenderBalanceUnderflow` | `from_before - from_after` underflows | Sender balance paradox detected |

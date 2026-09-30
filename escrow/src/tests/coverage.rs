@@ -353,6 +353,7 @@ fn escrow_error_discriminants_match_canonical_table() {
         (EscrowError::SenderBalanceDeltaMismatch, 40),
         (EscrowError::RecipientBalanceDeltaMismatch, 41),
         (EscrowError::SweepExceedsLiabilityFloor, 42),
+        (EscrowError::SelfTransferNotAllowed, 43),
         (EscrowError::PrimaryAttestationAlreadyBound, 50),
         (EscrowError::AttestationAppendLogCapacityReached, 51),
         (EscrowError::CollateralAmountNotPositive, 60),
