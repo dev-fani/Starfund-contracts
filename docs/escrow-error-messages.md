@@ -30,6 +30,7 @@ code/name summary only.
 | `PausedBlocksSettlement` | 211 | The operational pause is active when `settle` is called. |
 | `PausedBlocksWithdrawal` | 212 | The operational pause is active when `withdraw` is called. |
 | `PausedBlocksInvestorClaims` | 213 | The operational pause is active when `claim_investor_payout` is called. |
+| `PausedBlocksCancelFunding` | 214 | The operational pause is active when `cancel_funding` is called. |
 | `WithdrawFeeArithmeticOverflow` | 216 | `funded_amount * fee_bps` overflowed `i128` while computing the protocol fee at `withdraw`. |
 | `WithdrawNetArithmeticUnderflow` | 217 | `funded_amount - fee` underflowed while computing the net SME payout at `withdraw`. |
 
@@ -48,4 +49,4 @@ Codes raised by cross-contract callback entrypoints (`register_callback`, `execu
 
 Codes 36–41 (SEP-41 transfer-wrapper guards, also raised by `withdraw` and
 `claim_investor_payout`) are documented in
-[`docs/escrow-token-safety.md`](escrow-token-safety.md).
+[`docs/escrow-token-safety.md`](escrow-token-safety.md).

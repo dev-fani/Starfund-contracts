@@ -118,11 +118,14 @@ Emitted when an investor records their payout claim.
 2. `invoice_id` (Symbol)
 3. `investor` (Address)
 
+**Data:**
+1. `payout` (i128) — gross payout transferred to the investor
+
 **Example (JSON Decoded):**
 ```json
 {
   "topics": ["inv_claim", "INV_001", "G...INVESTOR"],
-  "data": null
+  "data": { "payout": "80000000" }
 }
 ```
 

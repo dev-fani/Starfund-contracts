@@ -74,6 +74,7 @@ matches its family (`All`, or the matching single scope).
 | `settle` | Settlement | `PausedBlocksSettlement` (211) |
 | `withdraw` | Withdrawal | `PausedBlocksWithdrawal` (212) |
 | `claim_investor_payout` | Claims | `PausedBlocksInvestorClaims` (213) |
+| `cancel_funding` | Funding | `PausedBlocksCancelFunding` (214) |
 
 The check calls `paused_active(&env)`, which:
 
@@ -115,7 +116,7 @@ a mandated cooling-off window before clearing.
 When **both** `DataKey::Paused` and `DataKey::LegalHold` are active, the
 pause gate is evaluated **first** in every gated entrypoint. This means:
 
-- The transaction fails with a `PausedBlocks*` variant (210–213), **not** a
+- The transaction fails with a `PausedBlocks*` variant (210–214), **not** a
   `LegalHoldBlocks*` variant (102, 120, 123, 125).
 - The legal hold error is never surfaced while the pause is active on the same
   entrypoint.
