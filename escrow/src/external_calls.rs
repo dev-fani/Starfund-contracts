@@ -69,7 +69,7 @@
 use crate::{ensure, fail, EscrowError};
 use soroban_sdk::{token::TokenClient, Address, Env, MuxedAddress};
 
-/// Transfer `amount` of `token_addr` from `from` (typically this escrow contract) to `treasury`,
+/// Transfer `amount` of `token_addr` from `from` (typically this escrow contract) to `recipient`,
 /// then verify SEP-41-style conservation: sender decreases and recipient increases by exactly
 /// `amount`.
 ///
@@ -89,13 +89,14 @@ use soroban_sdk::{token::TokenClient, Address, Env, MuxedAddress};
 /// * `env` - The Soroban environment
 /// * `token_addr` - Address of the SEP-41 token contract
 /// * `from` - Address transferring from (usually this escrow contract)
-/// * `treasury` - Address receiving the tokens
+/// * `recipient` - Address receiving the tokens
 /// * `amount` - Amount to transfer (must be positive)
 ///
 /// # Errors
 ///
-/// Emits typed [`EscrowError`] codes if `amount` is not positive, sender balance is insufficient,
-/// balance deltas do not equal `amount`, or balance delta calculation underflows.
+/// Emits typed [`EscrowError`] codes if `amount` is not positive, `from == recipient`,
+/// sender balance is insufficient, balance deltas do not equal `amount`, or balance delta
+/// calculation underflows.
 ///
 /// # Security Considerations
 ///
@@ -107,29 +108,30 @@ pub fn transfer_funding_token_with_balance_checks(
     env: &Env,
     token_addr: &Address,
     from: &Address,
-    treasury: &Address,
+    recipient: &Address,
     amount: i128,
 ) {
+    ensure(env, from != recipient, EscrowError::SelfTransferNotAllowed);
     ensure(env, amount > 0, EscrowError::TransferAmountNotPositive);
     let token = TokenClient::new(env, token_addr);
     let from_before = token.balance(from);
-    let treasury_before = token.balance(treasury);
+    let recipient_before = token.balance(recipient);
     ensure(
         env,
         from_before >= amount,
         EscrowError::InsufficientTokenBalanceBeforeTransfer,
     );
 
-    token.transfer(from, MuxedAddress::from(treasury.clone()), &amount);
+    token.transfer(from, MuxedAddress::from(recipient.clone()), &amount);
 
     let from_after = token.balance(from);
-    let treasury_after = token.balance(treasury);
+    let recipient_after = token.balance(recipient);
 
     let spent = from_before
         .checked_sub(from_after)
         .unwrap_or_else(|| fail(env, EscrowError::SenderBalanceUnderflow));
-    let received = treasury_after
-        .checked_sub(treasury_before)
+    let received = recipient_after
+        .checked_sub(recipient_before)
         .unwrap_or_else(|| fail(env, EscrowError::RecipientBalanceUnderflow));
 
     ensure(

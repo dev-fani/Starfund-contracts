@@ -4,7 +4,7 @@
 //! Uses mocked token implementations where feasible in the Soroban test harness.
 
 use super::super::external_calls::{
-    transfer_funding_token_with_balance_checks, transfer_into_escrow_with_balance_checks,
+    transfer_funding_token_inbound_with_balance_checks, transfer_funding_token_with_balance_checks,
 };
 use super::*;
 use soroban_sdk::{contract, contractimpl, token::TokenInterface, Address, Env, MuxedAddress};
@@ -114,6 +114,25 @@ fn test_negative_amount_rejected() {
     let treasury = Address::generate(&env);
 
     transfer_funding_token_with_balance_checks(&env, &token.id, &holder, &treasury, -1i128);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: self-transfer guard
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic]
+fn test_self_transfer_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let token = install_stellar_asset_token(&env);
+    let holder = deploy_id(&env);
+
+    token.stellar.mint(&holder, &1000i128);
+
+    // Sender and recipient are the same address: rejected with a dedicated error instead of
+    // surfacing as a confusing sender/recipient delta mismatch.
+    transfer_funding_token_with_balance_checks(&env, &token.id, &holder, &holder, 100i128);
 }
 
 // ---------------------------------------------------------------------------
@@ -568,7 +587,7 @@ fn test_insufficient_balance_panics_with_insufficient_token_balance() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: inbound transfer_into_escrow_with_balance_checks
+// Tests: inbound transfer_funding_token_inbound_with_balance_checks
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -581,7 +600,7 @@ fn test_inbound_fee_on_transfer_token_rejected() {
     let escrow = deploy_id(&env);
     mint_fee_token(&env, &fee_token_id, &investor, 1000i128);
     // Recipient (escrow) receives less than amount -> panic
-    transfer_into_escrow_with_balance_checks(&env, &fee_token_id, &investor, &escrow, 1000i128);
+    transfer_funding_token_inbound_with_balance_checks(&env, &fee_token_id, &investor, &escrow, 1000i128);
 }
 
 #[test]
@@ -592,7 +611,7 @@ fn test_inbound_zero_amount_rejected() {
     let token = install_stellar_asset_token(&env);
     let investor = deploy_id(&env);
     let escrow = Address::generate(&env);
-    transfer_into_escrow_with_balance_checks(&env, &token.id, &investor, &escrow, 0);
+    transfer_funding_token_inbound_with_balance_checks(&env, &token.id, &investor, &escrow, 0);
 }
 
 #[test]
@@ -603,7 +622,7 @@ fn test_inbound_negative_amount_rejected() {
     let token = install_stellar_asset_token(&env);
     let investor = deploy_id(&env);
     let escrow = Address::generate(&env);
-    transfer_into_escrow_with_balance_checks(&env, &token.id, &investor, &escrow, -1i128);
+    transfer_funding_token_inbound_with_balance_checks(&env, &token.id, &investor, &escrow, -1i128);
 }
 
 #[test]
@@ -615,7 +634,7 @@ fn test_inbound_insufficient_balance_rejected() {
     let investor = deploy_id(&env);
     let escrow = Address::generate(&env);
     // Investor has no tokens
-    transfer_into_escrow_with_balance_checks(&env, &token.id, &investor, &escrow, 1i128);
+    transfer_funding_token_inbound_with_balance_checks(&env, &token.id, &investor, &escrow, 1i128);
 }
 
 #[test]
@@ -628,7 +647,7 @@ fn test_inbound_lying_token_no_change_rejected() {
     let escrow = deploy_id(&env);
     mint_lying_token(&env, &lying_token_id, &investor, 1000i128);
     // No balance change -> RecipientBalanceDeltaMismatch
-    transfer_into_escrow_with_balance_checks(&env, &lying_token_id, &investor, &escrow, 1000i128);
+    transfer_funding_token_inbound_with_balance_checks(&env, &lying_token_id, &investor, &escrow, 1000i128);
 }
 
 #[test]
@@ -641,12 +660,12 @@ fn test_inbound_hook_token_recipient_decreases_rejected() {
     let escrow = deploy_id(&env);
     mint_hook_token(&env, &hook_token_id, &investor, 1000i128);
     // Hook reduces escrow balance after transfer
-    transfer_into_escrow_with_balance_checks(&env, &hook_token_id, &investor, &escrow, 1000i128);
+    transfer_funding_token_inbound_with_balance_checks(&env, &hook_token_id, &investor, &escrow, 1000i128);
 }
 
 #[test]
 #[should_panic]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: rebasing-token mock requires API reconciliation"]
 fn test_inbound_rebasing_token_sender_increases_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -655,7 +674,7 @@ fn test_inbound_rebasing_token_sender_increases_rejected() {
     let escrow = deploy_id(&env);
     mint_rebasing_token(&env, &rebase_token_id, &investor, 1000i128);
     // Sender ends with extra tokens -> SenderBalanceDeltaMismatch
-    transfer_into_escrow_with_balance_checks(&env, &rebase_token_id, &investor, &escrow, 1000i128);
+    transfer_funding_token_inbound_with_balance_checks(&env, &rebase_token_id, &investor, &escrow, 1000i128);
 }
 
 #[test]
@@ -669,7 +688,7 @@ fn test_inbound_compliant_token_passes() {
     token.stellar.mint(&investor, &amount);
     let investor_before = token.token.balance(&investor);
     let escrow_before = token.token.balance(&escrow);
-    transfer_into_escrow_with_balance_checks(&env, &token.id, &investor, &escrow, amount);
+    transfer_funding_token_inbound_with_balance_checks(&env, &token.id, &investor, &escrow, amount);
     let investor_after = token.token.balance(&investor);
     let escrow_after = token.token.balance(&escrow);
     assert_eq!(investor_before - investor_after, amount);

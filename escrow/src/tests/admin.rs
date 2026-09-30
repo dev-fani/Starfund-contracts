@@ -2249,6 +2249,111 @@ fn test_update_maturity_edge_cases_success() {
     assert_eq!(updated2.maturity, 500u64);
 }
 
+/// Issue #107: update_maturity must reject new maturities less than or equal to funding_deadline.
+#[test]
+fn test_update_maturity_rejects_at_or_before_funding_deadline() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let (token, treasury) = free_addresses(&env);
+    env.ledger().set_timestamp(100);
+
+    // Initialize with funding_deadline = 1000 and initial maturity = 2000
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "MAT_DEADLINE"),
+        &sme,
+        &10_000i128,
+        &500i64,
+        &2000u64,
+        &token,
+        &None,
+        &treasury,
+        &Some(1000u64),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None::<i64>,
+        &None::<u32>,
+    );
+
+    // Attempting update_maturity to 900 (< 1000) must fail with FundingDeadlineAtOrAfterMaturity
+    assert_contract_error(
+        client.try_update_maturity(&900u64, &0u32),
+        EscrowError::FundingDeadlineAtOrAfterMaturity,
+    );
+
+    // Attempting update_maturity to 1000 (== 1000) must also fail
+    assert_contract_error(
+        client.try_update_maturity(&1000u64, &0u32),
+        EscrowError::FundingDeadlineAtOrAfterMaturity,
+    );
+
+    // Attempting update_maturity to 1500 (> 1000) must succeed
+    let updated = client.update_maturity(&1500u64, &0u32);
+    assert_eq!(updated.maturity, 1500u64);
+}
+
+/// Issue #108: update_maturity consumes an admin nonce and rejects mismatches / replays.
+#[test]
+fn test_update_maturity_nonce_replay_protection() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let (token, treasury) = free_addresses(&env);
+    env.ledger().set_timestamp(100);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "MAT_NONCE"),
+        &sme,
+        &10_000i128,
+        &500i64,
+        &2000u64,
+        &token,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None::<i64>,
+        &None::<u32>,
+    );
+
+    assert_eq!(client.get_admin_nonce(), 0u32);
+
+    // Calling with future nonce (e.g. 5) fails with AdminNonceMismatch
+    assert_contract_error(
+        client.try_update_maturity(&2500u64, &5u32),
+        EscrowError::AdminNonceMismatch,
+    );
+    assert_eq!(client.get_admin_nonce(), 0u32);
+
+    // Calling with correct nonce (0) succeeds and increments nonce to 1
+    let updated = client.update_maturity(&2500u64, &0u32);
+    assert_eq!(updated.maturity, 2500u64);
+    assert_eq!(client.get_admin_nonce(), 1u32);
+
+    // Replay with stale nonce (0) fails
+    assert_contract_error(
+        client.try_update_maturity(&3000u64, &0u32),
+        EscrowError::AdminNonceMismatch,
+    );
+    assert_eq!(client.get_admin_nonce(), 1u32);
+
+    // Second call with correct nonce (1) succeeds
+    let updated2 = client.update_maturity(&3000u64, &1u32);
+    assert_eq!(updated2.maturity, 3000u64);
+    assert_eq!(client.get_admin_nonce(), 2u32);
+}
+
 // ── Authorization guard ordering audit (issue #265) ───────────────────────────
 //
 // Negative tests: each guarded entrypoint must trap when `require_auth` fails
@@ -2801,8 +2906,11 @@ fn auth_audit_request_clear_legal_hold_requires_admin() {
     let (client, admin, sme) = setup(&env);
     env.mock_all_auths();
     default_init(&client, &env, &admin, &sme);
+    // A clear request is only valid while a hold is active; activate one so the failure
+    // under test is the missing admin auth, not the active-hold precondition.
+    client.set_legal_hold(&true, &0u32);
     env.mock_auths(&[]);
-    client.request_clear_legal_hold(&0u32);
+    client.request_clear_legal_hold(&1u32);
 }
 
 #[test]
@@ -3411,7 +3519,7 @@ fn test_rebind_registry_ref_requires_admin_auth() {
 ///    does not affect settlement eligibility or the settled status.
 /// 3. The registry pointer can be freely mutated without touching the fund flow.
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: registry-ref flow API drift requires follow-up"]
 fn test_registry_ref_does_not_affect_settlement_or_funding() {
     use soroban_sdk::testutils::Events as _;
 
@@ -3591,6 +3699,7 @@ fn test_error_code_uniqueness() {
         EscrowError::LegalHoldClearRequestMissing as u32,
         EscrowError::LegalHoldClearNotReady as u32,
         EscrowError::LegalHoldClearDelayOverflow as u32,
+        EscrowError::LegalHoldNotActive as u32,
         EscrowError::FundingDeadlinePassed as u32,
         EscrowError::LegalHoldBlocksBeneficiaryRotation as u32,
         EscrowError::RotationNotOpen as u32,
@@ -3753,7 +3862,7 @@ fn test_lowered_horizon_existing_maturity_untouched_and_far_update_rejected() {
     // A subsequent update to 1_501 (one second beyond the new ceiling) must fail.
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.update_maturity(&1_501u64);
+            client.update_maturity(&1_501u64, &0u32);
         }))
         .is_err(),
         "update_maturity beyond the new horizon must be rejected"
@@ -3804,7 +3913,7 @@ fn test_lowered_horizon_allows_within_horizon_maturity_update() {
 
     // 1 hour from now (3_600 s) is within the new 2-hour horizon.
     let near_maturity = 1_000u64 + 3_600u64;
-    let updated = client.update_maturity(&near_maturity);
+    let updated = client.update_maturity(&near_maturity, &0u32);
     assert_eq!(
         updated.maturity, near_maturity,
         "maturity within the new horizon must be accepted"

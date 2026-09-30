@@ -415,6 +415,9 @@ pub const MAX_SETTLE_BATCH: u32 = 50;
 /// Upper bound on [`StarfundEscrow::refund_batch`] entries to keep storage/CPU bounded.
 pub const MAX_REFUND_BATCH: u32 = 50;
 
+/// Upper bound on [`StarfundEscrow::unfund_batch`] entries to keep storage/CPU bounded.
+pub const MAX_UNFUND_BATCH: u32 = 50;
+
 /// Upper bound on [`StarfundEscrow::set_investors_allowlisted`] batch size.
 pub const MAX_INVESTOR_ALLOWLIST_BATCH: u32 = 32;
 
@@ -669,6 +672,9 @@ pub enum EscrowError {
     /// Sweep would reduce the contract balance below outstanding investor liabilities.
     /// `balance - sweep_amt` must be `>= funded_amount - distributed_principal`.
     SweepExceedsLiabilityFloor = 42,
+    /// Token transfer wrapper rejected a self-transfer (`from == recipient`), which would
+    /// otherwise surface as a confusing sender/recipient delta mismatch.
+    SelfTransferNotAllowed = 43,
 
     /// [`StarfundEscrow::bind_primary_attestation_hash`] called when a primary hash exists.
     PrimaryAttestationAlreadyBound = 50,
@@ -698,6 +704,10 @@ pub enum EscrowError {
     CollateralTimestampBackwards = 62,
     /// [`StarfundEscrow::clear_sme_collateral_commitment`] called when no pledge exists.
     NoCollateralToClear = 63,
+    /// [`StarfundEscrow::batch_record_collateral`] received an empty batch.
+    CollateralBatchEmpty = 64,
+    /// [`StarfundEscrow::batch_record_collateral`] exceeded [`MAX_COLLATERAL_BATCH`].
+    CollateralBatchTooLarge = 65,
 
     /// [`StarfundEscrow::set_investors_allowlisted`] received an empty batch.
     InvestorBatchEmpty = 70,
@@ -730,6 +740,10 @@ pub enum EscrowError {
     NewCapNotHigher = 176,
     /// [`StarfundEscrow::lower_max_unique_investors`] set cap below current unique funder count.
     NewCapBelowCurrentFunderCount = 78,
+    /// [`StarfundEscrow::raise_min_contribution_floor`] called while escrow is not open.
+    FloorRaiseNotOpen = 178,
+    /// [`StarfundEscrow::raise_min_contribution_floor`] did not strictly raise the floor.
+    NewFloorNotHigher = 179,
     /// [`StarfundEscrow::update_maturity`] called while escrow is not open.
     MaturityUpdateNotOpen = 79,
     /// [`StarfundEscrow::propose_admin`] nominated the current admin address.
@@ -821,6 +835,12 @@ pub enum EscrowError {
     RefundBatchEmpty = 144,
     /// [`StarfundEscrow::refund_batch`] exceeded [`MAX_REFUND_BATCH`].
     RefundBatchTooLarge = 145,
+    /// [`StarfundEscrow::unfund_batch`] received an empty entries vector.
+    UnfundBatchEmpty = 251,
+    /// [`StarfundEscrow::unfund_batch`] exceeded [`MAX_UNFUND_BATCH`].
+    UnfundBatchTooLarge = 252,
+    /// [`StarfundEscrow::unfund_batch`] contained a duplicate investor address.
+    UnfundBatchDuplicateInvestor = 253,
 
     /// `clear_legal_hold` was called without a prior `request_legal_hold_clear`.
     LegalHoldClearRequestMissing = 150,
@@ -828,6 +848,8 @@ pub enum EscrowError {
     LegalHoldClearNotReady = 151,
     /// Computing the legal-hold clear ready-at timestamp would overflow.
     LegalHoldClearDelayOverflow = 152,
+    /// [`StarfundEscrow::request_clear_legal_hold`] called while no legal hold is active.
+    LegalHoldNotActive = 153,
     /// Funding deadline has passed, new deposits are rejected.
     FundingDeadlinePassed = 164,
 
@@ -838,6 +860,21 @@ pub enum EscrowError {
     RotationNotOpen = 161,
     /// The proposed new SME address is identical to the current beneficiary.
     NewSmeSameAsCurrent = 162,
+
+    /// A legal hold blocks rotating the payer address.
+    LegalHoldBlocksPayerRotation = 163,
+    /// Payer rotation was attempted while the escrow was not in a pre-settlement state
+    /// (`status` must be 0 = open or 1 = funded).
+    PayerRotationNotOpen = 178,
+    /// The proposed new payer address is identical to the current payer.
+    NewPayerSameAsCurrent = 179,
+    /// [`StarfundEscrow::rotate_payer`] blocked while operational pause is active.
+    PausedBlocksPayerRotation = 180,
+    /// [`StarfundEscrow::rotate_payer`] blocked while a dispute is active.
+    DisputeBlocksPayerRotation = 181,
+    /// [`StarfundEscrow::rotate_payer`] called after funding has commenced; the payer
+    /// address is immutable once `funded_amount > 0`.
+    PayerImmutableAfterFunding = 182,
 
     /// Attempted to accept admin role when no pending admin exists.
     /// @dev Historical note: Prior to PR #XYZ, this shared discriminant 163 with `FundingDeadlinePassed`.
@@ -856,7 +893,7 @@ pub enum EscrowError {
     /// [`validate_maturity_bounds`] rejected a maturity timestamp beyond the configured horizon.
     MaturityExceedsMaxHorizon = 167,
     /// [`StarfundEscrow::revoke_attestation_digest`] called on a non-revoked index.
-    AttestationNotRevoked = 168,
+    AttestationDigestNotRevoked = 252,
     /// [`StarfundEscrow::update_funding_deadline`] called while escrow is not open.
     FundingDeadlineUpdateNotOpen = 169,
     /// [`StarfundEscrow::claim_investor_payout`] computed a zero payout.
@@ -883,6 +920,8 @@ pub enum EscrowError {
     PausedBlocksWithdrawal = 212,
     /// [`StarfundEscrow::claim_investor_payout`] blocked while operational pause is active.
     PausedBlocksInvestorClaims = 213,
+    /// [`StarfundEscrow::set_paused`] attempted to clear a pause with a non-matching scope.
+    PauseScopeMismatch = 214,
 
     /// [`StarfundEscrow::init`] rejected `protocol_fee_bps` outside `0..=10_000`.
     ProtocolFeeBpsOutOfRange = 215,
@@ -1394,6 +1433,9 @@ pub enum DataKey {
     /// Used by [`StarfundEscrow::sweep_terminal_dust`] to compute outstanding liabilities:
     /// `outstanding = funded_amount - distributed_principal`.
     DistributedPrincipal,
+    /// Running total of principal released to the SME via [`StarfundEscrow::release`].
+    /// Absent ⇒ `0`; used to enforce that cumulative releases do not exceed funded principal.
+    ReleasedAmount,
     /// Configured maximum maturity horizon in seconds from current ledger time.
     /// Absent ΓçÆ falls back to [`DEFAULT_MATURITY_MAX_HORIZON_SECS`].
     /// Set at init and updatable via [`StarfundEscrow::update_maturity_max_horizon`].
@@ -1432,6 +1474,9 @@ pub enum DataKey {
     /// [`DataKey::PauseMaxDurationSecs`] to compute auto-expiry. Absent ⇒ pause was never
     /// activated.
     PausedAt,
+    /// Persisted typed scope and reason for the active operational pause.
+    /// Absent ⇒ no typed pause state is recorded (including legacy global pauses).
+    PauseState,
     /// Optional cap on the number of [`StarfundEscrow::set_paused`] calls allowed within
     /// [`DataKey::PauseToggleWindowSecs`]. Absent ⇒ `0` (unlimited), identical to pre-existing
     /// behavior. Set via [`StarfundEscrow::set_pause_rate_limit`].
@@ -1455,6 +1500,9 @@ pub enum DataKey {
     /// Monotonically increasing invocation nonce counter for cross-contract callbacks.
     /// Absent ⇒ `0`. Incremented on each callback registration.
     CallbackNonce,
+    /// Monotonically increasing nonce for replay protection on dual-auth admin entrypoints.
+    /// Absent ⇒ `0`, preserving backward compatibility for legacy deployments.
+    AdminNonce,
     /// Stored cross-contract callback context ([`CallbackContext`]) keyed by invocation nonce.
     /// Binds expected origin address, invocation nonce, and lifecycle phase.
     CallbackContext(u64),
@@ -1463,6 +1511,12 @@ pub enum DataKey {
     /// reads as `false`. Written by the dispute lifecycle (admin/off-chain) and checked by
     /// [`StarfundEscrow::close_escrow`].
     Dispute,
+    /// Running total of principal released to the SME; absent ⇒ `0` for legacy instances.
+    ReleasedAmount,
+    /// Expected nonce for admin replay protection; absent ⇒ `0`.
+    AdminNonce,
+    /// Funding-token decimal scale used to validate token amounts; absent until initialization.
+    FundingTokenScale,
 }
 
 // --- Data types ---
@@ -1870,6 +1924,30 @@ pub struct RentBumpEntry {
     pub contribution_ttl: u32,
 }
 
+/// A single row returned by [`StarfundEscrow::get_funding_records`].
+///
+/// Replaces the previous bare `(Address, i128)` tuple so client SDKs (TypeScript,
+/// Python, …) generate named field accessors (`record.investor`,
+/// `record.contribution`) instead of positional ones (`record[0]`, `record[1]`).
+///
+/// # Fields
+/// - `investor`: The investor address this record describes.
+/// - `contribution`: That investor's currently recorded principal contribution,
+///   read from persistent storage at call time.
+///
+/// # Guarantee
+/// `contribution` is always strictly positive: investors who have fully
+/// [`StarfundEscrow::unfund`]ed (or been fully refunded) still occupy a slot in
+/// [`DataKey::InvestorIndex`] but are filtered out of this view.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FundingRecord {
+    /// The investor address this record describes.
+    pub investor: Address,
+    /// The investor's active principal contribution (always `> 0`).
+    pub contribution: i128,
+}
+
 /// Typed return value from [`StarfundEscrow::settle`].
 ///
 /// Replaces the previous opaque tuple / raw [`InvoiceEscrow`] return with a
@@ -2024,6 +2102,16 @@ pub struct MinContributionFloorLowered {
 }
 
 #[contractevent]
+pub struct MinContributionFloorRaised {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_floor: i128,
+    pub new_floor: i128,
+}
+
+#[contractevent]
 pub struct MaxPerInvestorCapRaised {
     #[topic]
     pub name: Symbol,
@@ -2031,6 +2119,26 @@ pub struct MaxPerInvestorCapRaised {
     pub invoice_id: Symbol,
     pub old_cap: i128,
     pub new_cap: i128,
+}
+
+#[contractevent]
+pub struct MaxPerInvestorCapLowered {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_cap: i128,
+    pub new_cap: i128,
+}
+
+#[contractevent]
+pub struct MinContributionFloorRaised {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_floor: i128,
+    pub new_floor: i128,
 }
 
 /// Emitted by [`StarfundEscrow::update_funding_parameters`] after one or more
@@ -2247,15 +2355,6 @@ pub struct StorageLimitUpdatedEvent {
 }
 
 #[contractevent]
-pub struct AdminTransferredEvent {
-    #[topic]
-    pub name: Symbol,
-    #[topic]
-    pub invoice_id: Symbol,
-    pub new_admin: Address,
-}
-
-#[contractevent]
 pub struct AdminAcceptedEvent {
     #[topic]
     pub name: Symbol,
@@ -2288,23 +2387,6 @@ pub struct AdminProposalSuperseded {
     pub invoice_id: Symbol,
     pub previous_pending: Address,
     pub new_pending: Address,
-}
-
-/// Emitted by [`StarfundEscrow::cancel_pending_admin`] when a pending admin proposal is cancelled.
-///
-/// Indexers and operators can monitor this event to track when nominations are retracted.
-///
-/// # Fields
-/// - `name`: hardcoded `adm_can` symbol.
-/// - `invoice_id`: escrow invoice identifier.
-/// - `cancelled_pending`: the address whose pending admin nomination was revoked.
-#[contractevent]
-pub struct AdminProposalCancelled {
-    #[topic]
-    pub name: Symbol,
-    #[topic]
-    pub invoice_id: Symbol,
-    pub cancelled_pending: Address,
 }
 
 /// Emitted by [`StarfundEscrow::recover_admin`] when the current admin clears an
@@ -2347,6 +2429,16 @@ pub struct FundingTargetUpdated {
     pub new_target: i128,
 }
 
+#[contractevent]
+pub struct FundingDeadlineUpdated {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_deadline: Option<u64>,
+    pub new_deadline: Option<u64>,
+}
+
 /// Emitted by [\StarfundEscrow::extend_funding_deadline\] when the admin pushes the
 /// funding deadline forward while the escrow is open.
 #[contractevent]
@@ -2357,6 +2449,30 @@ pub struct FundingDeadlineExtended {
     pub invoice_id: Symbol,
     pub old_deadline: u64,
     pub new_deadline: u64,
+}
+
+#[contractevent]
+pub struct CallbackRegisteredEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
+}
+
+#[contractevent]
+pub struct CallbackExecutedEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
 }
 
 #[contractevent]
@@ -2493,6 +2609,30 @@ pub struct CollateralClearedEvt {
 }
 
 #[contractevent]
+pub struct CallbackRegisteredEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
+}
+
+#[contractevent]
+pub struct CallbackExecutedEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
+}
+
+#[contractevent]
 pub struct SmeWithdrew {
     #[topic]
     pub name: Symbol,
@@ -2513,6 +2653,8 @@ pub struct InvestorPayoutClaimed {
     pub investor: Address,
     #[topic]
     pub invoice_id: Symbol,
+    /// Gross payout transferred to the investor in the funding token.
+    pub payout: i128,
 }
 
 #[contractevent]
@@ -2639,6 +2781,17 @@ pub struct MaturityMaxHorizonRaised {
     pub new_horizon: u64,
 }
 
+/// Emitted by [`StarfundEscrow::lower_maturity_max_horizon`] after a safe horizon reduction.
+#[contractevent]
+pub struct MaturityMaxHorizonLowered {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_horizon: u64,
+    pub new_horizon: u64,
+}
+
 /// Digest entry with revocation status returned by `get_attestation_digest_at`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2705,45 +2858,9 @@ pub struct ContractUpgraded {
     pub new_wasm_hash: BytesN<32>,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CollateralPledge {
-    pub invoice_id: Symbol,
-    pub amount: i128,
-}
-
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
-
-/// Emitted by clear_sme_collateral_commitment when a pledge is retired.
-///
-/// `amount` carries the value from the removed pledge record.
-#[contractevent(topics = ["collateral_cleared"])]
-pub struct CollateralClearedEvt {
-    #[topic]
-    pub invoice_id: Symbol,
-    /// The amount that was recorded in the retired pledge.
-    pub amount: i128,
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn load_escrow(env: &Env) -> Result<InvoiceEscrow, EscrowError> {
-    env.storage()
-        .instance()
-        .get(&DataKey::Escrow)
-        .ok_or(EscrowError::EscrowNotInitialized)
-}
-
-/// Load escrow and require the caller to be the SME address.
-fn load_escrow_require_sme(env: &Env) -> Result<InvoiceEscrow, EscrowError> {
-    let escrow = load_escrow(env)?;
-    escrow.sme_address.require_auth();
-    Ok(escrow)
-}
 
 // ---------------------------------------------------------------------------
 // Contract
@@ -3657,37 +3774,6 @@ impl StarfundEscrow {
         sweep_amt
     }
 
-    /// Retire a previously recorded collateral pledge.
-    ///
-    /// Metadata-only: no tokens are moved. Requires SME auth.
-    ///
-    /// Guard ordering (ADR-002):
-    /// 1. Read-only existence check ΓÇö returns [`EscrowError::NoCollateralToClear`] if absent.
-    /// 2. `require_auth` on the SME address.
-    /// 3. Remove storage entry and emit [`CollateralClearedEvt`].
-    pub fn clear_sme_collateral_commitment(env: Env) -> Result<(), EscrowError> {
-        // 1. Read-only existence check (no auth yet).
-        let pledge: CollateralPledge = env
-            .storage()
-            .instance()
-            .get(&DataKey::SmeCollateralPledge)
-            .ok_or(EscrowError::NoCollateralToClear)?;
-
-        // 2. Load escrow and require SME auth.
-        let escrow = load_escrow_require_sme(&env)?;
-
-        // 3. Remove entry and emit retirement event.
-        env.storage()
-            .instance()
-            .remove(&DataKey::SmeCollateralPledge);
-        CollateralClearedEvt {
-            invoice_id: escrow.invoice_id,
-            amount: pledge.amount,
-        }
-        .publish(&env);
-        Ok(())
-    }
-
     /// Returns the remaining funding capacity before the funding target is reached.
     ///
     /// The remaining capacity is calculated as `funding_target - funded_amount`.
@@ -3791,22 +3877,27 @@ impl StarfundEscrow {
 
     /// Rotate the payer address that must authorize funding.
     ///
-    /// Permitted only before settlement (`status` 0 = open or 1 = funded) and
-    /// while no legal hold is active. Requires authorization from **both** the
+    /// Permitted only before settlement (`status` 0 = open or 1 = funded), before any
+    /// funding has commenced (`funded_amount == 0`), and while no legal hold, operational
+    /// pause, or active dispute is in effect. Requires authorization from **both** the
     /// current payer and the admin, so the payer can never be changed unilaterally.
-    /// A no-op rotation to the current address is rejected. Emits
-    /// [`PayerRotated`] with the prior and new addresses and returns the
-    /// updated escrow snapshot.
+    /// A no-op rotation to the current address is rejected. Emits [`PayerRotated`] with
+    /// the prior and new addresses and returns the updated escrow snapshot.
     ///
     /// # Errors
     ///
     /// | Condition | Typed error |
     /// |-----------|-------------|
     /// | Legal hold active | [`EscrowError::LegalHoldBlocksPayerRotation`] |
+    /// | Operational pause active | [`EscrowError::PausedBlocksPayerRotation`] |
+    /// | Dispute active | [`EscrowError::DisputeBlocksPayerRotation`] |
     /// | Escrow not open or funded | [`EscrowError::PayerRotationNotOpen`] |
+    /// | Funding has commenced (`funded_amount > 0`) | [`EscrowError::PayerImmutableAfterFunding`] |
     /// | `new_payer == current payer` | [`EscrowError::NewPayerSameAsCurrent`] |
     pub fn rotate_payer(env: Env, new_payer: Address, expected_nonce: u32) -> InvoiceEscrow {
         Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksPayerRotation);
+        guard_not_paused(&env, EscrowError::PausedBlocksPayerRotation, PauseEntry::Funding);
+        guard_not_disputed(&env, EscrowError::DisputeBlocksPayerRotation);
 
         let mut escrow = Self::get_escrow(env.clone());
 
@@ -3814,6 +3905,14 @@ impl StarfundEscrow {
             &env,
             escrow.status == 0 || escrow.status == 1,
             EscrowError::PayerRotationNotOpen,
+        );
+
+        // Payer is immutable once any funding has been recorded; mirrors the immutability
+        // check enforced by rotate_beneficiary (EscrowError::BeneficiaryImmutableAfterFunding).
+        ensure(
+            &env,
+            escrow.funded_amount == 0,
+            EscrowError::PayerImmutableAfterFunding,
         );
 
         ensure(
@@ -4442,33 +4541,46 @@ impl StarfundEscrow {
 
     /// Enumerate all funding records (investor address + contribution amount) with pagination.
     ///
-    /// Returns a paginated view of all investor funding records. Each record is a tuple of
-    /// (investor address, principal contribution amount in base units of the funding token).
-    /// The records are returned in the order they appear in the internal investor index.
+    /// Returns a paginated view of the escrow's active funding records. Each record is a typed
+    /// [`FundingRecord`] carrying the investor address and their principal contribution in base
+    /// units of the funding token. Records are returned in the order they appear in the internal
+    /// investor index.
     ///
     /// This is a read-only view with no state mutation. If zero funding records exist,
     /// or if `start` is beyond the last record, returns an empty vector.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `start` - Zero-based starting index for pagination.
-    /// * `limit` - Maximum number of records to return.
+    /// * `start` - Zero-based starting index into the investor index.
+    /// * `limit` - Maximum number of investor-index slots to scan.
     ///   If `limit` exceeds [`MAX_INVESTOR_READ_BATCH`] (50), it is silently clamped to the ceiling.
     ///
     /// # Returns
-    /// A `Vec<(Address, i128)>` where each tuple is an investor address and their cumulative
-    /// principal contribution. Returns an empty vector if:
+    /// A `Vec<FundingRecord>` of active investors and their cumulative principal contribution.
+    /// Returns an empty vector if:
     /// - No funding records exist (escrow has zero investors).
     /// - `start` is at or beyond the total record count.
     /// - `limit` is zero.
     ///
+    /// # Active-participant filtering
+    /// An investor whose contribution has been fully withdrawn (via
+    /// [`StarfundEscrow::unfund`] while the escrow is open, or via
+    /// [`StarfundEscrow::refund`] once cancelled) keeps its slot in
+    /// [`DataKey::InvestorIndex`] — the index is append-only so stored record offsets stay
+    /// stable — but their recorded contribution is `0`. Such slots are **skipped**: every
+    /// returned record has `contribution > 0`, so callers see only active participants.
+    ///
+    /// Because the scan window is defined over investor-index slots (not over the filtered
+    /// result), a page may legitimately return **fewer** records than `limit` even when more
+    /// active investors exist later in the index. A short page is therefore *not* a reliable
+    /// end-of-records signal on its own.
+    ///
     /// # Pagination and Continuation
     /// To iterate through all records, the caller should:
     /// 1. Call with `start=0, limit=50` (or any value up to the ceiling).
-    /// 2. The returned vector length (e.g., 50) indicates the number of records in this page.
-    /// 3. Next call uses `start = previous_start + items_returned.len()`.
-    /// 4. Stop when the returned vector is shorter than requested (indicates end of records)
-    ///    or is empty.
+    /// 2. Advance using the number of investor-index slots scanned (`limit`), **not** the
+    ///    returned vector length.
+    /// 3. Stop when the returned vector is empty.
     ///
     /// # Example
     /// ```ignore
@@ -4478,11 +4590,14 @@ impl StarfundEscrow {
     ///     if page.is_empty() {
     ///         break; // No more records
     ///     }
-    ///     // Process page...
-    ///     start += page.len() as u32;
+    ///     for record in page.iter() {
+    ///         // Self-documenting named fields instead of positional tuple access.
+    ///         log!(record.investor, record.contribution);
+    ///     }
+    ///     start += 50;
     /// }
     /// ```
-    pub fn get_funding_records(env: Env, start: u32, limit: u32) -> Vec<(Address, i128)> {
+    pub fn get_funding_records(env: Env, start: u32, limit: u32) -> Vec<FundingRecord> {
         let index: Vec<Address> = env
             .storage()
             .instance()
@@ -4501,7 +4616,16 @@ impl StarfundEscrow {
         for i in start..end {
             let investor = index.get(i).unwrap();
             let contribution = Self::get_persistent_investor_contribution(&env, investor.clone());
-            result.push_back((investor, contribution));
+            // Fully unfunded / refunded investors keep an index slot but hold no principal.
+            // Reporting them as `(investor, 0)` would misreport them as participants, so
+            // only active investors with a positive contribution are returned.
+            if contribution <= 0 {
+                continue;
+            }
+            result.push_back(FundingRecord {
+                investor,
+                contribution,
+            });
         }
         result
     }
@@ -5729,8 +5853,16 @@ impl StarfundEscrow {
     ///
     /// | Condition | Typed error |
     /// |-----------|-------------|
+    /// | no legal hold is active | [`EscrowError::LegalHoldNotActive`] |
     /// | `timestamp + delay` overflows | [`EscrowError::LegalHoldClearDelayOverflow`] |
     pub fn request_clear_legal_hold(env: Env, expected_nonce: u32) {
+        // A clear request is only meaningful while a hold is active; scheduling one for a
+        // non-existent hold would burn an admin nonce and emit a misleading event.
+        ensure(
+            &env,
+            Self::legal_hold_active(&env),
+            EscrowError::LegalHoldNotActive,
+        );
         let escrow = Self::load_escrow_require_admin(&env);
         Self::consume_admin_nonce(&env, expected_nonce);
 
@@ -5834,6 +5966,7 @@ impl StarfundEscrow {
     pub fn set_investor_allowlisted(env: Env, investor: Address, allowed: bool, expected_nonce: u32) {
         let escrow = Self::load_escrow_require_admin(&env);
         Self::consume_admin_nonce(&env, expected_nonce);
+        let was_allowlisted = Self::is_investor_allowlisted(env.clone(), investor.clone());
         env.storage()
             .persistent()
             .set(&DataKey::InvestorAllowlisted(investor.clone()), &allowed);
@@ -6125,7 +6258,7 @@ impl StarfundEscrow {
         FundingDeadlineUpdated {
             name: symbol_short!("fund_dl"),
             invoice_id: escrow.invoice_id.clone(),
-            prior_deadline: prior,
+            old_deadline: prior,
             new_deadline,
         }
         .publish(&env);
@@ -6235,6 +6368,62 @@ impl StarfundEscrow {
         new_cap
     }
 
+    /// Raise the minimum contribution floor while the escrow is still open.
+    ///
+    /// Admin-only counterpart to [`StarfundEscrow::lower_min_contribution_floor`]. The new floor
+    /// applies to all subsequent [`StarfundEscrow::fund`] /
+    /// [`StarfundEscrow::fund_with_commitment`] calls, including follow-on deposits from existing
+    /// investors.
+    ///
+    /// # Upper bound
+    /// `new_floor` may never exceed [`InvoiceEscrow::funding_target`]. Mirroring the bound enforced
+    /// at [`StarfundEscrow::init`] (`min_contribution <= amount`, where `amount` seeds
+    /// `funding_target`), a floor above the target would make the escrow permanently unfundable:
+    /// every deposit that satisfies the floor would also overshoot the target, so no investor
+    /// could ever fund. The check reuses [`EscrowError::MinContributionExceedsAmount`] so callers
+    /// see the same error they already handle for the init-time bound.
+    ///
+    /// # Errors
+    /// - [`EscrowError::FloorRaiseNotOpen`] if the escrow is not open (status != 0).
+    /// - [`EscrowError::NewFloorNotPositive`] if `new_floor` is not positive.
+    /// - [`EscrowError::NewFloorNotHigher`] if `new_floor` is not strictly above the current floor.
+    /// - [`EscrowError::MinContributionExceedsAmount`] if `new_floor` exceeds `funding_target`.
+    pub fn raise_min_contribution_floor(env: Env, new_floor: i128) -> i128 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        guard_status_eq(&env, escrow.status, 0, EscrowError::FloorRaiseNotOpen);
+        ensure(&env, new_floor > 0, EscrowError::NewFloorNotPositive);
+
+        let old_floor: i128 = env
+            .storage()
+            .instance()
+            .get(&keys::min_contribution_floor())
+            .unwrap_or(0);
+        ensure(&env, new_floor > old_floor, EscrowError::NewFloorNotHigher);
+
+        // A floor above the funding target can never be satisfied without overshooting the
+        // target, which would brick funding for the rest of the escrow's open lifetime.
+        ensure(
+            &env,
+            new_floor <= escrow.funding_target,
+            EscrowError::MinContributionExceedsAmount,
+        );
+
+        env.storage()
+            .instance()
+            .set(&keys::min_contribution_floor(), &new_floor);
+
+        MinContributionFloorRaised {
+            name: symbol_short!("floor_ra"),
+            invoice_id: escrow.invoice_id.clone(),
+            old_floor,
+            new_floor,
+        }
+        .publish(&env);
+
+        new_floor
+    }
+
     /// Lower the minimum contribution floor while the escrow is still open.
     ///
     /// This is admin-only and intentionally cannot raise the floor or set a non-positive
@@ -6319,6 +6508,79 @@ impl StarfundEscrow {
             .set(&keys::max_per_investor_cap(), &new_cap);
 
         MaxPerInvestorCapRaised {
+            name: symbol_short!("inv_cap"),
+            invoice_id: escrow.invoice_id,
+            old_cap,
+            new_cap,
+        }
+        .publish(&env);
+
+        new_cap
+    }
+
+    /// Raises the minimum contribution floor while the escrow is still open.
+    ///
+    /// The floor applies to each subsequent contribution. This is admin-only and requires
+    /// `new_floor` to be positive and strictly greater than the configured floor.
+    pub fn raise_min_contribution_floor(env: Env, new_floor: i128) -> i128 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        guard_status_eq(&env, escrow.status, 0, EscrowError::FloorRaiseNotOpen);
+        ensure(&env, new_floor > 0, EscrowError::NewFloorNotPositive);
+
+        let old_floor: i128 = env
+            .storage()
+            .instance()
+            .get(&keys::min_contribution_floor())
+            .unwrap_or(0);
+        ensure(&env, new_floor > old_floor, EscrowError::NewFloorNotHigher);
+
+        env.storage()
+            .instance()
+            .set(&keys::min_contribution_floor(), &new_floor);
+
+        MinContributionFloorRaised {
+            name: symbol_short!("floor_hi"),
+            invoice_id: escrow.invoice_id,
+            old_floor,
+            new_floor,
+        }
+        .publish(&env);
+
+        new_floor
+    }
+
+    /// Lowers the configured per-investor contribution cap while the escrow is open.
+    ///
+    /// Admin-only. A cap must already be configured, and `new_cap` must be positive and
+    /// strictly less than the current cap. The lower cap applies to subsequent deposits.
+    pub fn lower_max_per_investor(env: Env, new_cap: i128) -> i128 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        guard_status_eq(
+            &env,
+            escrow.status,
+            0,
+            EscrowError::PerInvestorCapLowerNotOpen,
+        );
+        ensure(&env, new_cap > 0, EscrowError::MaxPerInvestorCapNotPositive);
+
+        let old_cap: i128 = env
+            .storage()
+            .instance()
+            .get(&keys::max_per_investor_cap())
+            .unwrap_or_else(|| fail(&env, EscrowError::MaxPerInvestorCapNotConfigured));
+        ensure(
+            &env,
+            new_cap < old_cap,
+            EscrowError::MaxPerInvestorCapNotLowered,
+        );
+
+        env.storage()
+            .instance()
+            .set(&keys::max_per_investor_cap(), &new_cap);
+
+        MaxPerInvestorCapLowered {
             name: symbol_short!("inv_cap"),
             invoice_id: escrow.invoice_id,
             old_cap,
@@ -6792,7 +7054,7 @@ impl StarfundEscrow {
         #[cfg(any(test, feature = "testutils"))]
         register_mock_token_if_needed(&env, &token_addr);
 
-        external_calls::transfer_into_escrow_with_balance_checks(
+        external_calls::transfer_funding_token_inbound_with_balance_checks(
             &env,
             &token_addr,
             &investor,
@@ -6886,12 +7148,6 @@ impl StarfundEscrow {
     /// effect). Settlement is strictly once-only ΓÇö a second call is rejected with the
     /// dedicated [`EscrowError::EscrowAlreadySettled`] typed error.
     pub fn settle(env: Env) -> SettlementResult {
-        // Operational pause gate (read-only), before require_auth and orthogonal to legal hold.
-        ensure(
-            &env,
-            !Self::paused_blocks(&env, PauseEntry::Settlement),
-            EscrowError::PausedBlocksSettlement,
-        );
         // Operational pause gate (read-only), before require_auth and orthogonal to legal hold.
         guard_not_paused(
             &env,
@@ -7046,16 +7302,15 @@ impl StarfundEscrow {
     pub fn release(env: Env, amount: i128) -> InvoiceEscrow {
         ensure(&env, amount > 0, EscrowError::ReleaseAmountNotPositive);
 
-        ensure(
-            &env,
-            !Self::paused_active(&env),
-            EscrowError::PausedBlocksRelease,
-        );
         guard_not_paused(&env, EscrowError::PausedBlocksRelease);
         guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksRelease);
 
         // Load escrow, but require admin authorization.
-        let escrow: InvoiceEscrow = env.storage().instance().get(&DataKey::Escrow).unwrap();
+        let escrow: InvoiceEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow)
+            .unwrap_or_else(|| fail(&env, EscrowError::EscrowNotInitialized));
         escrow.admin.require_auth();
 
         guard_status_eq(&env, escrow.status, 1, EscrowError::ReleaseNotFunded);
@@ -7066,7 +7321,10 @@ impl StarfundEscrow {
             .get(&keys::released_amount())
             .unwrap_or(0);
 
-        let remaining = escrow.funded_amount.checked_sub(released_amount).unwrap();
+        let remaining = escrow
+            .funded_amount
+            .checked_sub(released_amount)
+            .unwrap_or_else(|| fail(&env, EscrowError::ReleaseExceedsRemaining));
         ensure(
             &env,
             amount <= remaining,
@@ -7092,7 +7350,9 @@ impl StarfundEscrow {
         let mut next_escrow = escrow.clone();
         let is_final = amount == remaining;
 
-        let new_released = released_amount.checked_add(amount).unwrap();
+        let new_released = released_amount
+            .checked_add(amount)
+            .unwrap_or_else(|| fail(&env, EscrowError::FundedAmountOverflow));
         env.storage()
             .instance()
             .set(&keys::released_amount(), &new_released);
@@ -7133,16 +7393,6 @@ impl StarfundEscrow {
             }
             .publish(&env);
         } else {
-            let prev_distributed: i128 = env
-                .storage()
-                .instance()
-                .get(&DataKey::DistributedPrincipal)
-                .unwrap_or(0);
-            env.storage().instance().set(
-                &DataKey::DistributedPrincipal,
-                &prev_distributed.saturating_add(amount),
-            );
-
             PartialRelease {
                 name: symbol_short!("part_rel"),
                 invoice_id: escrow.invoice_id.clone(),
@@ -7214,12 +7464,6 @@ impl StarfundEscrow {
     /// - [`EscrowError::WithdrawFeeArithmeticOverflow`] ΓÇö `funded_amount * fee_bps` overflowed `i128`.
     /// - [`EscrowError::WithdrawNetArithmeticUnderflow`] ΓÇö `funded_amount - fee` underflowed (unreachable for in-range `fee_bps`).
     pub fn withdraw(env: Env) -> InvoiceEscrow {
-        // Operational pause gate (read-only), orthogonal to legal hold.
-        ensure(
-            &env,
-            !Self::paused_blocks(&env, PauseEntry::Withdrawal),
-            EscrowError::PausedBlocksWithdrawal,
-        );
         // Operational pause gate (read-only), before require_auth and orthogonal to legal hold.
         guard_not_paused(
             &env,
@@ -7415,6 +7659,7 @@ impl StarfundEscrow {
             name: symbol_short!("inv_claim"),
             investor,
             invoice_id: escrow.invoice_id.clone(),
+            payout,
         }
         .publish(&env);
 
@@ -7480,10 +7725,27 @@ impl StarfundEscrow {
     /// # Formula (floor / truncating integer division)
     ///
     /// ```text
-    /// coupon       = total_principal ├ù effective_yield_bps / 10_000  (floor)
+    /// coupon       = total_principal × effective_yield_bps / 10_000  (floor)
     /// settle_pool  = total_principal + coupon
-    /// gross_payout = contribution ├ù settle_pool / total_principal     (floor)
+    /// gross_payout = contribution × settle_pool / total_principal     (floor)
     /// ```
+    ///
+    /// # Rounding residue
+    ///
+    /// Both divisions use **truncating (floor) integer arithmetic**, which means each
+    /// investor's payout is rounded down to the nearest base unit. Across all investors
+    /// this produces a cumulative rounding residue:
+    ///
+    /// ```text
+    /// residue = settle_pool − Σ gross_payout_i  (≥ 0)
+    /// ```
+    ///
+    /// The residue is bounded by the number of unique investors (at most one base unit
+    /// lost per investor per division step) and is never negative. It accumulates in the
+    /// contract balance after all investors have claimed and is swept by
+    /// [`StarfundEscrow::sweep_terminal_dust`] once the escrow reaches a terminal state.
+    /// Off-chain tooling must account for this residue when reconciling the settlement
+    /// pool against the sum of individual payouts.
     ///
     /// # Returns
     ///
@@ -7493,7 +7755,7 @@ impl StarfundEscrow {
     ///
     /// # Invariant
     ///
-    /// The sum of `compute_investor_payout` over all investors is Γëñ `total_principal + coupon`;
+    /// The sum of `compute_investor_payout` over all investors is ≤ `total_principal + coupon`;
     /// any rounding residual is swept by [`StarfundEscrow::sweep_terminal_dust`].
     ///
     /// # Overflow safety
@@ -7504,7 +7766,7 @@ impl StarfundEscrow {
     ///
     /// # Authorization
     ///
-    /// None ΓÇö pure read; no auth required.
+    /// None — pure read; no auth required.
     pub fn compute_investor_payout(env: Env, investor: Address) -> i128 {
         // Contribution fetch: returns 0 for non-participants without panicking.
         let contribution: i128 = Self::get_persistent_investor_contribution(&env, investor.clone());
@@ -7533,7 +7795,10 @@ impl StarfundEscrow {
             Self::get_persistent_investor_effective_yield(&env, investor.clone())
                 .unwrap_or(escrow.yield_bps);
 
-        // coupon = total_principal ├ù effective_yield_bps / 10_000  (floor)
+        // coupon = total_principal × effective_yield_bps / 10_000  (truncating floor division)
+        // Rounding: the remainder (total_principal × effective_yield_bps % 10_000) is silently
+        // discarded here. This is intentional — the residue accumulates in the contract balance
+        // and is swept by sweep_terminal_dust after all investors claim.
         let coupon = total_principal
             .checked_mul(effective_yield_bps as i128)
             .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
@@ -7544,7 +7809,10 @@ impl StarfundEscrow {
             .checked_add(coupon)
             .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
 
-        // gross_payout = contribution ├ù settle_pool / total_principal  (floor)
+        // gross_payout = contribution × settle_pool / total_principal  (truncating floor division)
+        // Rounding: each investor's payout is rounded down by at most 1 base unit. The cumulative
+        // residue across all investors (≥ 0) is bounded by the investor count and is swept by
+        // sweep_terminal_dust. See "# Rounding residue" in the function-level doc comment.
         contribution
             .checked_mul(settle_pool)
             .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
@@ -7554,45 +7822,68 @@ impl StarfundEscrow {
 
     /// Authoritative on-chain aggregate view of the total settlement pool owed by the SME.
     ///
-    /// Returns `total_principal + floor(total_principal ├ù yield_bps / 10_000)`, computed
-    /// from [`DataKey::FundingCloseSnapshot`] and the escrow's **base** `yield_bps` using
-    /// the same [`i128::checked_mul`] / [`i128::checked_div`] arithmetic and
-    /// [`EscrowError::ComputePayoutArithmeticOverflow`] guard as
-    /// [`StarfundEscrow::compute_investor_payout`].
+    /// Returns the **true total investor liability**: the sum of the gross payouts that every
+    /// recorded investor can claim via [`StarfundEscrow::compute_investor_payout`]. Each
+    /// investor's payout uses their own **effective yield** (the tier resolved at first deposit
+    /// by [`StarfundEscrow::fund_with_commitment`], else the escrow base yield), so the aggregate
+    /// is the exact amount the SME must repay for the contract to remain solvent through the
+    /// last [`StarfundEscrow::claim_investor_payout`] call.
+    ///
+    /// Solvency invariant (issue #94):
+    ///
+    /// ```text
+    /// get_settlement_pool() = Σ_i floor(contribution_i × settle_pool_i / total_principal)
+    /// Σ_i claimable payout_i ≤ get_settlement_pool()
+    /// ```
+    ///
+    /// The sum is exact (each term is the very same floored integer
+    /// [`StarfundEscrow::compute_investor_payout`] returns), so the pool can never be
+    /// under-funded for tiered escrows.
     ///
     /// # Rounding
     ///
-    /// The coupon is computed with truncating (floor) integer division, identical to the
-    /// per-investor formula:
+    /// Every term uses truncating (floor) integer division, identical to the per-investor
+    /// formula:
     ///
     /// ```text
-    /// coupon       = total_principal ├ù yield_bps / 10_000  (floor)
-    /// settle_pool  = total_principal + coupon
+    /// settle_pool_i = total_principal + floor(total_principal × effective_yield_bps_i / 10_000)
+    /// payout_i      = contribution_i × settle_pool_i / total_principal   (floor)
     /// ```
     ///
-    /// # Yield note
+    /// # Base-yield pool vs. tier-weighted pool
     ///
-    /// This view uses the escrow **base yield** (`InvoiceEscrow::yield_bps`). Per-investor
-    /// effective yields from [`StarfundEscrow::fund_with_commitment`] tier selection are
-    /// reflected individually in [`StarfundEscrow::compute_investor_payout`] but are **not**
-    /// aggregated here. The result is therefore an authoritative lower-bound aggregate that
-    /// avoids per-investor enumeration; it matches the base-yield pool denominator used by
-    /// all non-tiered investors.
+    /// [`StarfundEscrow::settle`] still reports a **base-yield** `settle_pool` in its
+    /// [`SettlementResult`] / [`EscrowSettled`] payload
+    /// (`funded_amount + floor(funded_amount × yield_bps / 10_000)`), computed without
+    /// enumerating investors. That figure is informational only; for an escrow whose investors
+    /// sit at mixed yield tiers it is a **lower bound** on the real liability. Off-chain
+    /// repayment tooling must use this view, not the `settle` return value, to determine how
+    /// much the SME owes.
     ///
     /// # Returns
     ///
     /// - `0` when [`DataKey::FundingCloseSnapshot`] does not exist (escrow not yet funded).
-    /// - Computed floor `total_principal + coupon` otherwise.
+    /// - `0` when `total_principal <= 0` (degenerate snapshot).
+    /// - The base-yield pool when no investor is recorded in [`DataKey::InvestorIndex`]
+    ///   (defensive fallback; a funded escrow always records at least one investor).
+    /// - The sum of all per-investor gross payouts otherwise.
+    ///
+    /// # Cost
+    ///
+    /// O(n) over [`DataKey::InvestorIndex`], which is hard-capped at
+    /// [`MAX_UNIQUE_INVESTORS`] by [`StarfundEscrow::fund_impl`]. This is a read-only view and
+    /// is not on the release path measured by `release_budget_tests`.
     ///
     /// # Overflow safety
     ///
-    /// All intermediate multiplications use [`i128::checked_mul`]; divisions use
-    /// [`i128::checked_div`]. Emits [`EscrowError::ComputePayoutArithmeticOverflow`] (code 129)
-    /// rather than silently producing a wrong value.
+    /// All intermediate multiplications use [`i128::checked_mul`]; divisions and the running
+    /// aggregate sum use [`i128::checked_div`] / [`i128::checked_add`]. Emits
+    /// [`EscrowError::ComputePayoutArithmeticOverflow`] (code 129) rather than silently
+    /// producing a wrong value.
     ///
     /// # Authorization
     ///
-    /// None ΓÇö pure read; no auth required and no state mutation.
+    /// None — pure read; no auth required and no state mutation.
     pub fn get_settlement_pool(env: Env) -> i128 {
         // Snapshot must exist (written when escrow first reaches status == 1).
         // Return 0 before funding, matching compute_investor_payout semantics.
@@ -7609,28 +7900,96 @@ impl StarfundEscrow {
             return 0;
         }
 
-        // Read the escrow base yield_bps.
+        // Read the escrow base yield_bps (fallback yield for non-tiered investors).
         let escrow: InvoiceEscrow = env
             .storage()
             .instance()
             .get(&DataKey::Escrow)
             .unwrap_or_else(|| fail(&env, EscrowError::EscrowNotInitialized));
 
-        // coupon = total_principal ├ù yield_bps / 10_000  (floor)
-        let coupon = total_principal
-            .checked_mul(escrow.yield_bps as i128)
-            .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
-            .checked_div(10_000)
-            .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
+        // The recorded investor set is the authoritative liability universe.
+        let index: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvestorIndex)
+            .unwrap_or_else(|| Vec::new(&env));
 
-        // settle_pool = total_principal + coupon
-        total_principal
-            .checked_add(coupon)
-            .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
+        // Defensive fallback: no recorded investor means no claimable liability, so the
+        // base-yield pool is returned (a funded escrow always records >= 1 investor).
+        if index.is_empty() {
+            let coupon = total_principal
+                .checked_mul(escrow.yield_bps as i128)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
+                .checked_div(10_000)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
+
+            return total_principal
+                .checked_add(coupon)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
+        }
+
+        // Σ payout_i, term-by-term identical to compute_investor_payout so the aggregate
+        // can never under-fund the last claimant.
+        let mut total_liability: i128 = 0;
+        for i in 0..index.len() {
+            let investor = index.get(i).unwrap();
+
+            // Zero-contribution investors hold no claim; compute_investor_payout returns 0.
+            let contribution: i128 =
+                Self::get_persistent_investor_contribution(&env, investor.clone());
+            if contribution <= 0 {
+                continue;
+            }
+
+            // Per-investor tiered yield, else the escrow base yield.
+            let effective_yield_bps: i64 =
+                Self::get_persistent_investor_effective_yield(&env, investor.clone())
+                    .unwrap_or(escrow.yield_bps);
+
+            // settle_pool_i = total_principal + floor(total_principal × yield_i / 10_000)
+            let coupon = total_principal
+                .checked_mul(effective_yield_bps as i128)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
+                .checked_div(10_000)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
+
+            let settle_pool_i = total_principal
+                .checked_add(coupon)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
+
+            // payout_i = floor(contribution_i × settle_pool_i / total_principal)
+            let payout = contribution
+                .checked_mul(settle_pool_i)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
+                .checked_div(total_principal)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
+
+            total_liability = total_liability
+                .checked_add(payout)
+                .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
+        }
+
+        total_liability
     }
 
-    pub fn update_maturity(env: Env, new_maturity: u64) -> InvoiceEscrow {
+    /// Admin-only setter for the invoice maturity timestamp.
+    ///
+    /// Updates [`InvoiceEscrow::maturity`] to `new_maturity`. Only valid while the
+    /// escrow is in **open** status (`status == 0`).
+    ///
+    /// # Authorization
+    /// Requires admin authorization and consumes an admin nonce (`expected_nonce`).
+    ///
+    /// # Errors
+    /// - [`EscrowError::AdminNonceMismatch`] if `expected_nonce` does not match the stored admin nonce.
+    /// - [`EscrowError::MaturityUpdateNotOpen`] if escrow status is not open (`0`).
+    /// - [`EscrowError::MaturityUnchanged`] if `new_maturity` equals the current maturity.
+    /// - [`EscrowError::MaturityInPast`] if `new_maturity` is in the past and non-zero.
+    /// - [`EscrowError::MaturityExceedsMaxHorizon`] if `new_maturity` exceeds current max horizon.
+    /// - [`EscrowError::FundingDeadlineAtOrAfterMaturity`] if a funding deadline is configured and `new_maturity <= deadline`.
+    pub fn update_maturity(env: Env, new_maturity: u64, expected_nonce: u32) -> InvoiceEscrow {
         let mut escrow = Self::load_escrow_require_admin(&env);
+        Self::consume_admin_nonce(&env, expected_nonce);
 
         guard_status_eq(&env, escrow.status, 0, EscrowError::MaturityUpdateNotOpen);
 
@@ -7646,6 +8005,14 @@ impl StarfundEscrow {
             .get::<DataKey, u64>(&DataKey::MaturityMaxHorizon)
             .unwrap_or(DEFAULT_MATURITY_MAX_HORIZON_SECS);
         validate_maturity_bounds(&env, new_maturity, max_horizon);
+
+        if let Some(deadline) = env.storage().instance().get(&keys::funding_deadline()) {
+            ensure(
+                &env,
+                deadline < new_maturity,
+                EscrowError::FundingDeadlineAtOrAfterMaturity,
+            );
+        }
 
         let old_maturity = escrow.maturity;
         escrow.maturity = new_maturity;
@@ -7679,9 +8046,10 @@ impl StarfundEscrow {
     /// Requires the signature of the current [`InvoiceEscrow::admin`].
     ///
     /// # Errors
-    /// - [`EscrowError::YieldBpsUpdateNotOpen`] ΓÇö escrow is not in open status.
-    /// - [`EscrowError::YieldBpsOutOfRange`] ΓÇö `new_yield_bps` is outside `0..=10_000`.
-    /// - [`EscrowError::YieldBpsUnchanged`] ΓÇö `new_yield_bps` equals the current value.
+    /// - [`EscrowError::YieldBpsUpdateNotOpen`] — escrow is not in open status.
+    /// - [`EscrowError::YieldBpsUpdateFunded`] — escrow has already received funding.
+    /// - [`EscrowError::YieldBpsOutOfRange`] — `new_yield_bps` is outside `0..=10_000`.
+    /// - [`EscrowError::YieldBpsUnchanged`] — `new_yield_bps` equals the current value.
     ///
     /// # Events
     /// Emits [`YieldBpsUpdatedEvent`] with `invoice_id`, `old_yield_bps`, and `new_yield_bps`.
@@ -7692,6 +8060,12 @@ impl StarfundEscrow {
         let mut escrow = Self::load_escrow_require_admin(&env);
 
         guard_status_eq(&env, escrow.status, 0, EscrowError::YieldBpsUpdateNotOpen);
+
+        ensure(
+            &env,
+            escrow.funded_amount == 0,
+            EscrowError::YieldBpsUpdateFunded,
+        );
 
         ensure(
             &env,
@@ -7882,6 +8256,59 @@ impl StarfundEscrow {
 
         MaturityMaxHorizonRaised {
             name: symbol_short!("mtry_rse"),
+            invoice_id: escrow.invoice_id,
+            old_horizon,
+            new_horizon,
+        }
+        .publish(&env);
+
+        new_horizon
+    }
+
+    /// Lowers the maturity-max-horizon ceiling without invalidating the escrow's current maturity.
+    ///
+    /// Requires admin authorization and a strictly smaller horizon. The proposed ceiling must
+    /// still reach the existing absolute maturity timestamp (`now + new_horizon >= maturity`).
+    ///
+    /// # Errors
+    /// - [`EscrowError::HorizonNotLowered`] if `new_horizon` is not strictly below the current
+    ///   horizon.
+    /// - [`EscrowError::MaturityExceedsMaxHorizon`] if the proposed ceiling would invalidate the
+    ///   current maturity or computing the ceiling overflows.
+    ///
+    /// # Events
+    /// Emits [`MaturityMaxHorizonLowered`] with the old and new horizons.
+    pub fn lower_maturity_max_horizon(env: Env, new_horizon: u64) -> u64 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        let old_horizon = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::MaturityMaxHorizon)
+            .unwrap_or(DEFAULT_MATURITY_MAX_HORIZON_SECS);
+        ensure(
+            &env,
+            new_horizon < old_horizon,
+            EscrowError::HorizonNotLowered,
+        );
+
+        let latest_allowed_maturity = env
+            .ledger()
+            .timestamp()
+            .checked_add(new_horizon)
+            .unwrap_or_else(|| fail(&env, EscrowError::MaturityExceedsMaxHorizon));
+        ensure(
+            &env,
+            escrow.maturity <= latest_allowed_maturity,
+            EscrowError::MaturityExceedsMaxHorizon,
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MaturityMaxHorizon, &new_horizon);
+
+        MaturityMaxHorizonLowered {
+            name: symbol_short!("mtry_lwr"),
             invoice_id: escrow.invoice_id,
             old_horizon,
             new_horizon,
@@ -8111,8 +8538,10 @@ impl StarfundEscrow {
             .publish(&env);
         }
 
-        let window = validity_window_secs.unwrap_or(DEFAULT_ADMIN_PROPOSAL_VALIDITY_SECS);
-        let expiry = env.ledger().timestamp().saturating_add(window);
+        let expiry = env
+            .ledger()
+            .timestamp()
+            .saturating_add(DEFAULT_ADMIN_PROPOSAL_VALIDITY_SECS);
 
         env.storage()
             .instance()
@@ -8153,7 +8582,7 @@ impl StarfundEscrow {
     /// - [`EscrowError::AdminProposalExpired`] if the proposal's validity window has passed.
     ///
     /// # Events
-    /// Emits [`AdminTransferredEvent`] (topic: `admin`) containing the `invoice_id` and the `new_admin` address.
+    /// Emits [`AdminAcceptedEvent`] (topic: `adm_acc`) containing the `invoice_id`, `prior_admin`, and `new_admin` address.
     pub fn accept_admin(env: Env) -> InvoiceEscrow {
         let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         ensure(&env, pending.is_some(), EscrowError::NoPendingAdmin);
@@ -8516,11 +8945,15 @@ impl StarfundEscrow {
     /// for details on the cancellation lifecycle.
     ///
     /// # Errors
-    /// Emits typed [`EscrowError`] codes when legal hold is active, the escrow is uninitialized,
-    /// or the escrow is not in status 0 (open).
+    /// Emits typed [`EscrowError`] codes when legal hold is active, the operational pause blocks
+    /// the funding scope, the escrow is uninitialized, or the escrow is not in status 0 (open).
     pub fn cancel_funding(env: Env, expected_nonce: u32) -> InvoiceEscrow {
-        guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksCancelFunding);
-        guard_not_disputed(&env, EscrowError::DisputeBlocksCancelFunding);
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksCancelFunding);
+        guard_not_paused(
+            &env,
+            EscrowError::PausedBlocksCancelFunding,
+            PauseEntry::Funding,
+        );
 
         let mut escrow = Self::load_escrow_require_admin(&env);
         Self::consume_admin_nonce(&env, expected_nonce);
@@ -8631,9 +9064,9 @@ impl StarfundEscrow {
     /// - [`EscrowError::RefundBatchEmpty`] if `investors` is empty
     /// - [`EscrowError::RefundBatchTooLarge`] if `investors.len() > [`MAX_REFUND_BATCH`]
     ///
-    /// Per-entry errors (non-cancelled status, zero contribution, auth failure) are **not**
-    /// silently skipped ΓÇö they terminate the entire batch. Only already-refunded entries
-    /// (where [`DataKey::InvestorRefunded`] is `true`) are safely skipped.
+    /// Per-entry errors (non-cancelled status, auth failure) are **not** silently skipped ΓÇö they
+    /// terminate the entire batch. Entries with no recorded contribution (zero balance) and
+    /// already-refunded entries (where [`DataKey::InvestorRefunded`] is `true`) are safely skipped.
     ///
     /// # Events
     /// One [`InvestorRefundedEvt`] per newly-refunded investor.
@@ -8660,8 +9093,11 @@ impl StarfundEscrow {
                 continue;
             }
 
-            // Apply identical per-investor gates as single refund().
-            Self::refund(env.clone(), investor);
+            // Apply identical per-investor gates as single refund(), but pass
+            // `skip_zero_contribution = true` so addresses with no recorded contribution
+            // are skipped silently (batch mode) instead of aborting the whole batch.
+            guard_not_disputed(&env, EscrowError::DisputeBlocksRefund);
+            Self::refund_impl(&env, investor, true);
         }
     }
 
@@ -8774,6 +9210,37 @@ impl StarfundEscrow {
         escrow
     }
 
+    /// Batch unfund entrypoint: return principal for multiple investors in one atomic call.
+    ///
+    /// Each investor authorizes their own entry. Duplicate addresses are rejected before any
+    /// entry is processed; if any entry fails, the Soroban invocation rolls back the whole batch.
+    pub fn unfund_batch(env: Env, entries: Vec<(Address, i128)>) -> InvoiceEscrow {
+        let n = entries.len();
+
+        ensure(&env, n > 0, EscrowError::UnfundBatchEmpty);
+        ensure(&env, n <= MAX_UNFUND_BATCH, EscrowError::UnfundBatchTooLarge);
+
+        for i in 0..n {
+            let (address_i, _) = entries.get(i).unwrap();
+            for j in (i + 1)..n {
+                let (address_j, _) = entries.get(j).unwrap();
+                ensure(
+                    &env,
+                    address_i != address_j,
+                    EscrowError::UnfundBatchDuplicateInvestor,
+                );
+            }
+        }
+
+        let mut escrow = Self::get_escrow(env.clone());
+        for i in 0..n {
+            let (investor, amount) = entries.get(i).unwrap();
+            escrow = Self::unfund(env.clone(), investor, amount);
+        }
+
+        escrow
+    }
+
     /// Whether an investor has already received a refund in a cancelled escrow.
     pub fn is_investor_refunded(env: Env, investor: Address) -> bool {
         env.storage()
@@ -8790,6 +9257,14 @@ impl StarfundEscrow {
         env.storage()
             .instance()
             .get(&DataKey::DistributedPrincipal)
+            .unwrap_or(0)
+    }
+
+    /// Total principal cumulatively released to the SME.
+    pub fn get_released_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&keys::released_amount())
             .unwrap_or(0)
     }
 

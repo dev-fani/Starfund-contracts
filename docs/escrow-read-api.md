@@ -760,25 +760,32 @@ Returns `true` when an investor's principal has been returned via `refund` in a 
 **Storage keys:** `DataKey::FundingCloseSnapshot`, `DataKey::Escrow`  
 **Signature:** `pub fn get_settlement_pool(env: Env) -> i128`
 
-Returns the **total settlement pool** owed by the SME — the aggregate principal plus base-yield
-coupon the SME must repay to fully satisfy all investors. Avoids rounding divergence that arises
-when off-chain tooling re-derives the formula from raw snapshot fields.
+Returns the **total settlement pool** owed by the SME — the aggregate of every investor's
+pro-rata payout, using each investor's own effective yield. Avoids rounding divergence that
+arises when off-chain tooling re-derives the formula from raw snapshot fields.
+
+**Storage keys:** `DataKey::FundingCloseSnapshot`, `DataKey::Escrow`, `DataKey::InvestorIndex`,
+`DataKey::InvestorContribution`, `DataKey::InvestorEffectiveYield`
 
 #### Formula (floor / truncating integer division)
 
 ```text
-coupon       = total_principal × yield_bps / 10_000  (floor)
-settle_pool  = total_principal + coupon
+settle_pool_i = total_principal + total_principal × effective_yield_bps_i / 10_000  (floor)
+payout_i      = contribution_i × settle_pool_i / total_principal   (floor)
+
+get_settlement_pool() = Σ_i payout_i
 ```
 
-Where `total_principal` is from `DataKey::FundingCloseSnapshot` and `yield_bps` is the
-escrow base yield from `InvoiceEscrow::yield_bps`.
+Where `total_principal` is from `DataKey::FundingCloseSnapshot`, `contribution_i` from
+`DataKey::InvestorContribution`, and `effective_yield_bps_i` is the investor's tiered yield
+(`DataKey::InvestorEffectiveYield`) or the escrow base yield (`InvoiceEscrow::yield_bps`).
 
 #### Yield note
 
-Uses the escrow **base yield** only. Per-investor effective yields from `fund_with_commitment`
-tier selection are reflected individually in `compute_investor_payout` but are **not** aggregated
-here.
+The pool is **tier-weighted**, not base-yield. `settle()` still reports the base-yield figure
+(`funded_amount + floor(funded_amount × yield_bps / 10_000)`) in `SettlementResult` /
+`EscrowSettled`; that value is a **lower bound** on the real liability for mixed-tier escrows
+and is informational only. Repayment tooling must use this view.
 
 #### Return values
 
@@ -786,17 +793,24 @@ here.
 |-----------|---------|
 | `DataKey::FundingCloseSnapshot` absent (escrow not yet funded) | `0` |
 | `total_principal <= 0` (degenerate snapshot) | `0` |
-| Normal funded state | `total_principal + floor(total_principal × yield_bps / 10_000)` |
+| No recorded investor (defensive fallback) | `total_principal + floor(total_principal × yield_bps / 10_000)` |
+| Funded state with investors | `Σ_i payout_i` (tier-weighted total liability) |
+
+#### Cost
+
+O(n) over `DataKey::InvestorIndex`, hard-capped at `MAX_UNIQUE_INVESTORS` (10 000).
 
 #### Overflow safety
 
-All multiplications use `i128::checked_mul`; all divisions use `i128::checked_div`. Emits
+All multiplications use `i128::checked_mul`; divisions and the running sum use
+`i128::checked_div` / `i128::checked_add`. Emits
 `EscrowError::ComputePayoutArithmeticOverflow` (code 129) on overflow.
 
 #### Rounding invariant
 
-Sum of all per-investor `compute_investor_payout` values is guaranteed ≤ `get_settlement_pool()`.
-Any fractional residue is swept by `sweep_terminal_dust`.
+`get_settlement_pool()` is the **exact** sum of all per-investor `compute_investor_payout`
+values, so the pool is never under-funded for tiered claims. Any sub-unit residue between
+`settle()`'s base-yield pool and this figure is reclaimed by `sweep_terminal_dust`.
 
 #### Authorization
 

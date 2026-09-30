@@ -1772,10 +1772,9 @@ fn test_update_maturity_beyond_horizon_rejected() {
         &None::<u32>,
     );
     assert_contract_error(
-        client.try_update_maturity(&(1000u64 + DEFAULT_MATURITY_MAX_HORIZON_SECS + 1)),
+        client.try_update_maturity(&(1000u64 + DEFAULT_MATURITY_MAX_HORIZON_SECS + 1), &0u32),
         EscrowError::MaturityExceedsMaxHorizon,
     );
-    client.update_maturity(&(1000u64 + DEFAULT_MATURITY_MAX_HORIZON_SECS + 1), &0u32);
 }
 
 #[test]
@@ -1806,10 +1805,9 @@ fn test_update_maturity_in_past_rejected() {
         &None::<u32>,
     );
     assert_contract_error(
-        client.try_update_maturity(&1000u64),
+        client.try_update_maturity(&1000u64, &0u32),
         EscrowError::MaturityInPast,
     );
-    client.update_maturity(&1000u64, &0u32);
 }
 
 // ── update_maturity_max_horizon ─────────────────────────────────────────

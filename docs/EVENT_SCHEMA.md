@@ -49,7 +49,7 @@ The current contract defines 20 event structs.
 | `FundingStateChanged` | `fund_st_ch` | `fund`, `fund_with_commitment`, `fund_batch`, `update_funding_target`, `partial_settle` |
 | `EscrowSettled` | `escrow_sd` | `settle` |
 | `MaturityUpdatedEvent` | `maturity` | `update_maturity` |
-| `AdminTransferredEvent` | `admin` | `accept_admin` |
+| `AdminAcceptedEvent` | `adm_acc` | `accept_admin` |
 | `AdminProposedEvent` | `adm_prop` | `propose_admin`, `transfer_admin` |
 | `BeneficiaryRotated` | `ben_rot` | `rotate_beneficiary` |
 | `FundingTargetUpdated` | `fund_tgt` | `update_funding_target` |
@@ -209,7 +209,7 @@ Data:
 | `old_maturity` | `u64` |
 | `new_maturity` | `u64` |
 
-### `AdminTransferredEvent`
+### `AdminAcceptedEvent`
 
 Emitted after successful `accept_admin`.
 
@@ -217,21 +217,22 @@ Topics:
 
 | Index | Field | Type | Value |
 |---:|---|---|---|
-| 0 | fixed event topic | `Symbol` | `admin_transferred_event` |
-| 1 | `name` | `Symbol` | `admin` |
+| 0 | fixed event topic | `Symbol` | `admin_accepted_event` |
+| 1 | `name` | `Symbol` | `adm_acc` |
 | 2 | `invoice_id` | `Symbol` | Escrow invoice id |
 
 Data:
 
 | Field | Type |
 |---|---|
+| `prior_admin` | `Address` |
 | `new_admin` | `Address` |
 
 ### `AdminProposedEvent`
 
 Emitted after successful `propose_admin`. The deprecated `transfer_admin`
 shim delegates to `propose_admin`, so it emits this event rather than
-`AdminTransferredEvent`.
+`AdminAcceptedEvent`.
 
 Topics:
 
@@ -359,7 +360,11 @@ Topics:
 | 2 | `investor` | `Address` | Claiming investor |
 | 3 | `invoice_id` | `Symbol` | Escrow invoice id |
 
-Data: empty map; this struct has no non-topic fields.
+Data:
+
+| Field | Type |
+|---|---|
+| `payout` | `i128` |
 
 ### `FundingCancelled`
 
