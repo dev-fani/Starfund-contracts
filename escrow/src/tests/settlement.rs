@@ -3646,6 +3646,25 @@ fn update_yield_bps_fails_when_funded() {
     );
 }
 
+/// `update_yield_bps` must be rejected when escrow is partially funded (status == 0, funded_amount > 0).
+#[test]
+fn update_yield_bps_fails_when_partially_funded() {
+    let env = Env::default();
+    let (client, _admin) = setup_yield_bps_test(&env, "YLD_PART_01", 800);
+
+    // Partially fund (below TARGET) so status remains 0 (open)
+    let investor = Address::generate(&env);
+    client.fund(&investor, &100i128);
+    let escrow = client.get_escrow();
+    assert_eq!(escrow.status, 0u32);
+    assert_eq!(escrow.funded_amount, 100i128);
+
+    assert_contract_error(
+        client.try_update_yield_bps(&900i64),
+        EscrowError::YieldBpsUpdateFunded,
+    );
+}
+
 /// `update_yield_bps` must be rejected when escrow is settled (status == 2).
 #[test]
 fn update_yield_bps_fails_when_settled() {
