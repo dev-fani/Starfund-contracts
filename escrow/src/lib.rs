@@ -2796,20 +2796,6 @@ pub struct ContractUpgraded {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn load_escrow(env: &Env) -> Result<InvoiceEscrow, EscrowError> {
-    env.storage()
-        .instance()
-        .get(&DataKey::Escrow)
-        .ok_or(EscrowError::EscrowNotInitialized)
-}
-
-/// Load escrow and require the caller to be the SME address.
-fn load_escrow_require_sme(env: &Env) -> Result<InvoiceEscrow, EscrowError> {
-    let escrow = load_escrow(env)?;
-    escrow.sme_address.require_auth();
-    Ok(escrow)
-}
-
 // ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------

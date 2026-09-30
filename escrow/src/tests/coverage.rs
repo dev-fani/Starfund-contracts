@@ -1279,6 +1279,17 @@ fn test_overwrite_then_clear() {
 
     client.clear_sme_collateral_commitment();
     assert!(client.get_sme_collateral_commitment().is_none());
+
+    let events = env.events().all();
+    let expected = CollateralClearedEvt {
+        name: symbol_short!("coll_clr"),
+        invoice_id: client.get_escrow().invoice_id,
+        asset,
+        amount: PLEDGE * 2,
+        recorded_at: pledge.recorded_at,
+    }
+    .to_xdr(&env, &client.address);
+    assert_eq!(events.events().last().unwrap().clone(), expected);
 }
 
 // ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
