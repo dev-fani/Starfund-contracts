@@ -2295,23 +2295,6 @@ pub struct AdminProposalSuperseded {
     pub new_pending: Address,
 }
 
-/// Emitted by [`StarfundEscrow::cancel_pending_admin`] when a pending admin proposal is cancelled.
-///
-/// Indexers and operators can monitor this event to track when nominations are retracted.
-///
-/// # Fields
-/// - `name`: hardcoded `adm_can` symbol.
-/// - `invoice_id`: escrow invoice identifier.
-/// - `cancelled_pending`: the address whose pending admin nomination was revoked.
-#[contractevent]
-pub struct AdminProposalCancelled {
-    #[topic]
-    pub name: Symbol,
-    #[topic]
-    pub invoice_id: Symbol,
-    pub cancelled_pending: Address,
-}
-
 /// Emitted by [`StarfundEscrow::recover_admin`] when the current admin clears an
 /// expired, abandoned admin-transfer proposal after the proposal timelock.
 #[contractevent]
@@ -2352,6 +2335,16 @@ pub struct FundingTargetUpdated {
     pub new_target: i128,
 }
 
+#[contractevent]
+pub struct FundingDeadlineUpdated {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_deadline: Option<u64>,
+    pub new_deadline: Option<u64>,
+}
+
 /// Emitted by [\StarfundEscrow::extend_funding_deadline\] when the admin pushes the
 /// funding deadline forward while the escrow is open.
 #[contractevent]
@@ -2362,6 +2355,30 @@ pub struct FundingDeadlineExtended {
     pub invoice_id: Symbol,
     pub old_deadline: u64,
     pub new_deadline: u64,
+}
+
+#[contractevent]
+pub struct CallbackRegisteredEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
+}
+
+#[contractevent]
+pub struct CallbackExecutedEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
 }
 
 #[contractevent]
@@ -2495,6 +2512,30 @@ pub struct CollateralClearedEvt {
     pub amount: i128,
     /// Ledger timestamp from the original recorded commitment.
     pub recorded_at: u64,
+}
+
+#[contractevent]
+pub struct CallbackRegisteredEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
+}
+
+#[contractevent]
+pub struct CallbackExecutedEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    #[topic]
+    pub origin: Address,
+    pub nonce: u64,
+    pub phase: u32,
 }
 
 #[contractevent]
@@ -2708,28 +2749,6 @@ pub struct ContractUpgraded {
     #[topic]
     pub invoice_id: Symbol,
     pub new_wasm_hash: BytesN<32>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CollateralPledge {
-    pub invoice_id: Symbol,
-    pub amount: i128,
-}
-
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
-
-/// Emitted by clear_sme_collateral_commitment when a pledge is retired.
-///
-/// `amount` carries the value from the removed pledge record.
-#[contractevent(topics = ["collateral_cleared"])]
-pub struct CollateralClearedEvt {
-    #[topic]
-    pub invoice_id: Symbol,
-    /// The amount that was recorded in the retired pledge.
-    pub amount: i128,
 }
 
 // ---------------------------------------------------------------------------
@@ -3660,37 +3679,6 @@ impl StarfundEscrow {
         .publish(&env);
 
         sweep_amt
-    }
-
-    /// Retire a previously recorded collateral pledge.
-    ///
-    /// Metadata-only: no tokens are moved. Requires SME auth.
-    ///
-    /// Guard ordering (ADR-002):
-    /// 1. Read-only existence check ΓÇö returns [`EscrowError::NoCollateralToClear`] if absent.
-    /// 2. `require_auth` on the SME address.
-    /// 3. Remove storage entry and emit [`CollateralClearedEvt`].
-    pub fn clear_sme_collateral_commitment(env: Env) -> Result<(), EscrowError> {
-        // 1. Read-only existence check (no auth yet).
-        let pledge: CollateralPledge = env
-            .storage()
-            .instance()
-            .get(&DataKey::SmeCollateralPledge)
-            .ok_or(EscrowError::NoCollateralToClear)?;
-
-        // 2. Load escrow and require SME auth.
-        let escrow = load_escrow_require_sme(&env)?;
-
-        // 3. Remove entry and emit retirement event.
-        env.storage()
-            .instance()
-            .remove(&DataKey::SmeCollateralPledge);
-        CollateralClearedEvt {
-            invoice_id: escrow.invoice_id,
-            amount: pledge.amount,
-        }
-        .publish(&env);
-        Ok(())
     }
 
     /// Returns the remaining funding capacity before the funding target is reached.
@@ -6131,7 +6119,7 @@ impl StarfundEscrow {
         FundingDeadlineUpdated {
             name: symbol_short!("fund_dl"),
             invoice_id: escrow.invoice_id.clone(),
-            prior_deadline: prior,
+            old_deadline: prior,
             new_deadline,
         }
         .publish(&env);
@@ -6798,7 +6786,7 @@ impl StarfundEscrow {
         #[cfg(any(test, feature = "testutils"))]
         register_mock_token_if_needed(&env, &token_addr);
 
-        external_calls::transfer_into_escrow_with_balance_checks(
+        external_calls::transfer_funding_token_inbound_with_balance_checks(
             &env,
             &token_addr,
             &investor,
