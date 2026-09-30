@@ -18,7 +18,7 @@ Every state-mutating entrypoint and the identity required to authorize it.
 | `update_maturity` | `escrow.admin` | `escrow.admin.require_auth()` | Only in `status == 0` |
 | `update_funding_target` | `escrow.admin` | `escrow.admin.require_auth()` | Only in `status == 0`; `new_target >= funded_amount` |
 | `set_legal_hold` / `clear_legal_hold` | `escrow.admin` | `escrow.admin.require_auth()` | No timelock; no multisig enforced on-chain |
-| `set_paused` | `escrow.admin` | `escrow.admin.require_auth()` | Operational pause, orthogonal to legal hold; single-call toggle, **no** clear delay |
+| `set_paused` | `escrow.admin` | `escrow.admin.require_auth()` | Scoped operational pause, orthogonal to legal hold; clear requires a matching scope or `PauseScope::All` |
 | `set_allowlist_active` | `escrow.admin` | `escrow.admin.require_auth()` | Enables/disables `AllowlistActive` gate |
 | `set_investor_allowlisted` | `escrow.admin` | `escrow.admin.require_auth()` | Writes to **persistent** storage (see §5.4) |
 | `bind_primary_attestation_hash` | `escrow.admin` | `escrow.admin.require_auth()` | Single-set; second call panics |
@@ -230,12 +230,13 @@ See `docs/escrow-legal-hold.md` § "Failure mode: hold + lost admin key".
 ### 5.10 Operational pause is orthogonal to legal hold
 
 `DataKey::Paused` is a lightweight incident-response circuit breaker toggled by
-the **current** `escrow.admin` via `set_paused(active)` and read via `is_paused()`.
+the **current** `escrow.admin` via `set_paused(active, scope, reason)` and read via `is_paused()`.
 It is **independent** of `LegalHold`:
 
 - It carries **no compliance semantics** and has **no** two-phase clear delay — a
-  single authorized call flips it on or off, suitable for fast incident response
-  (e.g. a suspected token bug).
+  single authorized call changes it, suitable for fast incident response (e.g. a
+  suspected token bug). The active `PauseScope` can target funding, settlement,
+  withdrawal, claims, or all gated flows.
 - It gates `fund`, `settle`, `withdraw`, and `claim_investor_payout` as a read-only
   precondition **before** `require_auth` (ADR-002 / §6 ordering), with dedicated
   typed errors (`PausedBlocksFunding`, `PausedBlocksSettlement`,
@@ -305,7 +306,7 @@ Line numbers refer to `escrow/src/lib.rs` at schema version 6; re-audit after re
 ### Negative-auth test coverage
 
 All state-mutating entrypoints are actively tested against incorrect authorization rules.
-See the canonical compliance test section in [`escrow/src/tests/admin.rs`](file:///home/demigodjayydy/Desktop/Starfund-contracts/escrow/src/tests/admin.rs) under `auth_audit_*`.
+See the canonical compliance test section in [`escrow/src/tests/admin.rs`](../escrow/src/tests/admin.rs) under `auth_audit_*`.
 
 | Entrypoint | Test location |
 |---|---|
