@@ -282,7 +282,7 @@ fn sweep_liability_floor_blocks_sweep_when_investor_not_yet_refunded() {
 }
 
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: liability-floor flow API drift requires follow-up"]
 fn sweep_liability_floor_allows_sweep_of_excess_above_outstanding() {
     // Two investors fund 500 each. One is refunded. 500 outstanding remains.
     // Contract has 1001 tokens (500 refunded, 500 outstanding, 1 dust).
@@ -420,7 +420,7 @@ fn sweep_liability_floor_zero_funded_amount_allows_sweep() {
 }
 
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: liability-floor flow API drift requires follow-up"]
 fn distributed_principal_accumulates_across_multiple_refunds() {
     // Three investors; refund them one by one and verify the counter.
     let env = Env::default();
@@ -524,7 +524,7 @@ fn setup_multi_investor_cancelled<'a>(
 }
 
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: liability-floor flow API drift requires follow-up"]
 fn sweep_liability_floor_refund_then_sweep_sequence() {
     let env = Env::default();
     env.mock_all_auths();
@@ -590,7 +590,7 @@ fn sweep_liability_floor_one_unit_over_fails() {
 }
 
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: liability-floor flow API drift requires follow-up"]
 fn sweep_liability_floor_capped_by_max_dust_sweep() {
     let env = Env::default();
     env.mock_all_auths();
@@ -672,7 +672,7 @@ fn sweep_liability_floor_legal_hold_blocks() {
 }
 
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: liability-floor flow API drift requires follow-up"]
 fn sweep_liability_floor_all_refunded_sweep_all_dust() {
     let env = Env::default();
     env.mock_all_auths();
@@ -721,7 +721,7 @@ fn reconciliation_reports_zero_surplus_when_balance_equals_liability() {
 }
 
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: reconciliation flow API drift requires follow-up"]
 fn reconciliation_surplus_equals_sweepable_dust_before_and_after_partial_refund() {
     // Two investors fund 500 each; 1 unit of dust is minted on top (balance 1001).
     let env = Env::default();
@@ -916,9 +916,32 @@ fn sweep_terminal_dust_emits_treasury_dust_swept_event() {
             recipient: treasury,
             token: token.id,
             amount: dust,
+            remaining_balance: 0i128,
         }
         .to_xdr(&env, &contract_id)
     );
+}
+
+#[test]
+fn sweep_terminal_dust_keeps_cancelled_status_and_preserves_refund_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    let fund_amount = 1_000i128;
+    let dust = 7i128;
+    let (token, _treasury) =
+        setup_cancelled_with_token(&env, &client, &admin, &sme, &investor, fund_amount);
+
+    token.stellar.mint(&client.address, &dust);
+    assert_eq!(client.get_escrow().status, 4);
+
+    let swept = client.sweep_terminal_dust(&dust);
+    assert_eq!(swept, dust);
+    assert_eq!(client.get_escrow().status, 4);
+
+    client.refund(&investor);
+    assert_eq!(client.get_distributed_principal(), fund_amount);
 }
 
 #[test]

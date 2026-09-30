@@ -421,6 +421,28 @@ fn request_clear_legal_hold_by_admin_succeeds_with_zero_delay() {
     assert!(!client.get_legal_hold());
 }
 
+/// `request_clear_legal_hold` must revert with [`EscrowError::LegalHoldNotActive`]
+/// when no hold is active, so no admin nonce is burned and no misleading
+/// `LegalHoldClearRequested` event is emitted for a non-existent hold.
+#[test]
+fn request_clear_legal_hold_without_active_hold_fails() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    init_open_with_clear_delay(&client, &env, &admin, &sme, "LHR005", Some(0));
+    assert!(!client.get_legal_hold());
+
+    assert_contract_error(
+        client.try_request_clear_legal_hold(&1u32),
+        EscrowError::LegalHoldNotActive,
+    );
+    // No clear window was scheduled.
+    assert!(client.get_legal_hold_clearable_at().is_none());
+    // The admin nonce was not consumed, so the same nonce is still usable.
+    client.set_legal_hold(&true, &0u32);
+    client.request_clear_legal_hold(&1u32);
+    assert!(client.get_legal_hold_clearable_at().is_some());
+}
+
 #[test]
 #[should_panic]
 fn request_clear_legal_hold_by_non_admin_panics() {
@@ -486,7 +508,7 @@ fn cancel_clear_legal_hold_with_pending_request_succeeds() {
 
 #[test]
 #[should_panic(expected = "HostError: Error(Contract, #150)")]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: legal-hold cancellation flow requires API reconciliation"]
 fn cancel_clear_legal_hold_without_pending_request_panics() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
@@ -508,7 +530,7 @@ fn cancel_clear_legal_hold_by_non_admin_panics() {
 }
 
 #[test]
-#[ignore = "upstream latent: escrow API/test drift"]
+#[ignore = "triaged: legal-hold cancellation flow requires API reconciliation"]
 fn cancel_clear_legal_hold_allows_new_request_after_cancellation() {
     let env = Env::default();
     let (client, admin, sme) = setup(&env);
@@ -602,7 +624,7 @@ fn hold_persists_after_admin_handover() {
     let new_admin = Address::generate(&env);
     init_funded(&client, &env, &admin, &sme, &investor, "LHX003");
     client.set_legal_hold(&true, &0u32);
-    client.propose_admin(&new_admin, &1u32);
+    client.propose_admin(&new_admin, &0u32, &None);
     client.accept_admin();
     // Hold is still active after admin handover.
     assert!(client.get_legal_hold());
@@ -730,7 +752,7 @@ fn non_risk_operations_not_blocked_by_hold() {
 
     // Two-step admin handover must not be blocked.
     let new_admin = Address::generate(&env);
-    client.propose_admin(&new_admin, &2u32);
+    client.propose_admin(&new_admin, &0u32, &None);
     assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
     client.accept_admin();
     let escrow = client.get_escrow();
@@ -982,7 +1004,7 @@ fn recovery_new_admin_clears_hold_and_operations_resume() {
 
     // --- Step 2: propose + accept new admin while hold is active. ---
     // propose_admin and accept_admin are NOT gated by the hold (by design).
-    client.propose_admin(&new_admin, &1u32);
+    client.propose_admin(&new_admin, &0u32, &None);
     assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
     client.accept_admin();
     // Hold persists after handover.

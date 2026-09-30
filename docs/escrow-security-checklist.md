@@ -18,13 +18,14 @@ Every state-mutating entrypoint and the identity required to authorize it.
 | `update_maturity` | `escrow.admin` | `escrow.admin.require_auth()` | Only in `status == 0` |
 | `update_funding_target` | `escrow.admin` | `escrow.admin.require_auth()` | Only in `status == 0`; `new_target >= funded_amount` |
 | `set_legal_hold` / `clear_legal_hold` | `escrow.admin` | `escrow.admin.require_auth()` | No timelock; no multisig enforced on-chain |
-| `set_paused` | `escrow.admin` | `escrow.admin.require_auth()` | Operational pause, orthogonal to legal hold; single-call toggle, **no** clear delay |
+| `set_paused` | `escrow.admin` | `escrow.admin.require_auth()` | Scoped operational pause, orthogonal to legal hold; clear requires a matching scope or `PauseScope::All` |
 | `set_allowlist_active` | `escrow.admin` | `escrow.admin.require_auth()` | Enables/disables `AllowlistActive` gate |
 | `set_investor_allowlisted` | `escrow.admin` | `escrow.admin.require_auth()` | Writes to **persistent** storage (see §5.4) |
 | `bind_primary_attestation_hash` | `escrow.admin` | `escrow.admin.require_auth()` | Single-set; second call panics |
 | `append_attestation_digest` | `escrow.admin` | `escrow.admin.require_auth()` | Bounded at `MAX_ATTESTATION_APPEND_ENTRIES` = 32 |
-| `fund` | `investor` (caller-supplied) | `investor.require_auth()` | `status == 0`; allowlist-gated when active |
-| `fund_with_commitment` | `investor` (caller-supplied) | `investor.require_auth()` | First deposit only (`prev == 0`); sets claim lock |
+| `fund` | `investor` and `payer` (caller-supplied) | `investor.require_auth()` and `escrow.payer.require_auth()` | `status == 0`; allowlist-gated when active; payer authorizes funding |
+| `fund_with_commitment` | `investor` and `payer` (caller-supplied) | `investor.require_auth()` and `escrow.payer.require_auth()` | First deposit only (`prev == 0`); sets claim lock; payer authorizes funding |
+| `fund_batch` | each `investor` and `payer` | each `investor.require_auth()` and `escrow.payer.require_auth()` | Per-entry funding authorization; bounded by `MAX_FUND_BATCH` |
 | `record_sme_collateral_commitment` | `escrow.sme_address` | `escrow.sme_address.require_auth()` | Ledger record only; no token transfer |
 | `batch_record_collateral` | `escrow.sme_address` | `escrow.sme_address.require_auth()` | Batch ledger record (all-or-nothing); bounded at `MAX_COLLATERAL_BATCH` = 50 |
 | `settle` | `escrow.sme_address` | `escrow.sme_address.require_auth()` | `status == 1`; optional maturity gate |
@@ -60,13 +61,19 @@ All `get_*` and `is_*` functions carry no `require_auth`. They expose full escro
 - Receives at most `MAX_DUST_SWEEP_AMOUNT` = 100,000,000 base units per call, only in terminal states.
 - **Risk**: if treasury address is a contract, confirm it cannot re-enter or redirect the transfer during the SEP-41 call. Soroban host-function atomicity makes interleaved re-entry impossible, but the treasury contract receiving the transfer could call back into unrelated contracts after the balance check.
 
-### 2.4 Funding Token (`DataKey::FundingToken`)
+### 2.4 Payer (`InvoiceEscrow::payer`)
+
+- Set to `admin` at `init`; mutable only through `rotate_payer`, which requires both the current payer and admin to authorize the change.
+- Required alongside the investor for `fund`, `fund_with_commitment`, and `fund_batch`; it is a trusted co-signer for funding commitments, not a token custodian.
+- **Risk**: a compromised payer can authorize funding entries with an investor, subject to the escrow's status, allowlist, contribution, and cap checks. Production deployments should govern payer rotation and monitor changes to this address.
+
+### 2.5 Funding Token (`DataKey::FundingToken`)
 
 - Set once at `init`; immutable.
 - Treated as a compliant SEP-41 token for all balance-delta checks.
 - See §4 for threat model.
 
-### 2.5 Registry (`DataKey::RegistryRef`)
+### 2.6 Registry (`DataKey::RegistryRef`)
 
 - Optional; written as a hint at `init`.
 - **No on-chain authority.** The contract never reads or verifies this address after storage. Off-chain indexers must not treat its presence as proof of current registry membership.
@@ -230,12 +237,13 @@ See `docs/escrow-legal-hold.md` § "Failure mode: hold + lost admin key".
 ### 5.10 Operational pause is orthogonal to legal hold
 
 `DataKey::Paused` is a lightweight incident-response circuit breaker toggled by
-the **current** `escrow.admin` via `set_paused(active)` and read via `is_paused()`.
+the **current** `escrow.admin` via `set_paused(active, scope, reason)` and read via `is_paused()`.
 It is **independent** of `LegalHold`:
 
 - It carries **no compliance semantics** and has **no** two-phase clear delay — a
-  single authorized call flips it on or off, suitable for fast incident response
-  (e.g. a suspected token bug).
+  single authorized call changes it, suitable for fast incident response (e.g. a
+  suspected token bug). The active `PauseScope` can target funding, settlement,
+  withdrawal, claims, or all gated flows.
 - It gates `fund`, `settle`, `withdraw`, and `claim_investor_payout` as a read-only
   precondition **before** `require_auth` (ADR-002 / §6 ordering), with dedicated
   typed errors (`PausedBlocksFunding`, `PausedBlocksSettlement`,
@@ -260,13 +268,22 @@ SEP-41 token transfer occurs until the relevant `require_auth` succeeds.
 ### Canonical sequence
 
 ```
-1. Read-only preconditions (legal hold, status, input asserts)
-2. Address::require_auth() for the bound role
-3. Storage writes and token transfers (external_calls only)
+1. Read-only preconditions (lightweight gates: operational pause)
+2. Address::require_auth() for the bound role (first auth)
+3. Read-only preconditions (status, legal hold, input asserts)
+4. Additional Address::require_auth() if multiple signers required (e.g. payer)
+5. Storage writes and token transfers (external_calls only)
 ```
 
+**Note:** `fund_impl` uses a variant of this pattern (issue #265) where steps 1–3 are
+interleaved: operational pause gates occur before step 2, but floor/decimal/status checks
+occur after step 2. This improves denial-of-service protection by validating input amounts
+early while still maintaining the invariant that storage writes occur only after all
+`require_auth` calls succeed. The pattern is: (1a) pause, (2) investor auth, (1b) input
+asserts + floor + status, (2b) payer auth, (3) writes.
+
 Reading `DataKey::Escrow` before step 2 is **intentional** — it is read-only
-and does not weaken the auth boundary. Refactors must not move step 3 above step 2.
+and does not weaken the auth boundary. Refactors must not move step 5 above step 2.
 
 ### Entrypoint checklist
 
@@ -283,7 +300,7 @@ and does not weaken the auth boundary. Refactors must not move step 3 above step
 | `set_investor_allowlisted` | `escrow.admin` | `get_escrow` | line ~978 | persistent allowlist set |
 | `bind_primary_attestation_hash` | `escrow.admin` | `get_escrow`, `has` check | line ~791 | `PrimaryAttestationHash` set |
 | `append_attestation_digest` | `escrow.admin` | `get_escrow`, log read | line ~820 | log append + set |
-| `fund` / `fund_with_commitment` | `investor` | floor read | line ~1119 (`investor`) | per-investor keys |
+| `fund` / `fund_with_commitment` | `investor` | pause gate | line ~6482 (`investor`) | per-investor keys |
 | `record_sme_collateral_commitment` | `escrow.sme_address` | `get_escrow` | line ~911 | collateral set |
 | `settle` | `escrow.sme_address` | pause, legal hold, `get_escrow` | line ~1282 | `DataKey::Escrow` set |
 | `withdraw` | `escrow.sme_address` | pause, legal hold, `get_escrow` | line ~1321 | `DataKey::Escrow` set |
@@ -296,7 +313,7 @@ Line numbers refer to `escrow/src/lib.rs` at schema version 6; re-audit after re
 ### Negative-auth test coverage
 
 All state-mutating entrypoints are actively tested against incorrect authorization rules.
-See the canonical compliance test section in [`escrow/src/tests/admin.rs`](file:///home/demigodjayydy/Desktop/Starfund-contracts/escrow/src/tests/admin.rs) under `auth_audit_*`.
+See the canonical compliance test section in [`escrow/src/tests/admin.rs`](../escrow/src/tests/admin.rs) under `auth_audit_*`.
 
 | Entrypoint | Test location |
 |---|---|
