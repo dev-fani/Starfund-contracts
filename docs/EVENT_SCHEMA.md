@@ -359,7 +359,11 @@ Topics:
 | 2 | `investor` | `Address` | Claiming investor |
 | 3 | `invoice_id` | `Symbol` | Escrow invoice id |
 
-Data: empty map; this struct has no non-topic fields.
+Data:
+
+| Field | Type |
+|---|---|
+| `payout` | `i128` |
 
 ### `FundingCancelled`
 
