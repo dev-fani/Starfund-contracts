@@ -26,7 +26,9 @@
 //! invariant assertion; deficits are surfaced as negative `surplus`.
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, String};
+use soroban_sdk::{
+    testutils::Address as _, token::StellarAssetClient, Address, Env, String, Vec as SorobanVec,
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -401,5 +403,47 @@ fn reconciliation_deficit_display() {
     assert_eq!(view.outstanding_liability, 1000);
     assert!(view.surplus < 0, "surplus must be negative in deficit");
     assert_eq!(view.surplus, -1000i128);
+    assert_invariant(&client, &token);
+}
+
+// ── Test: refund_batch skips zero-contribution addresses (#92) ───────────────
+
+/// `refund_batch` runs in batch mode, so an address with no recorded
+/// contribution must be skipped silently instead of aborting the whole batch
+/// with `NoContributionToRefund`.
+#[test]
+fn refund_batch_skips_zero_contribution_addresses() {
+    let env = Env::default();
+    let (client, token, _sme) = setup_escrow(&env, 2000, "BATCHRF01");
+
+    let funded_a = Address::generate(&env);
+    let funded_b = Address::generate(&env);
+    let zero_a = Address::generate(&env);
+    let zero_b = Address::generate(&env);
+
+    mint_and_fund(&client, &token, &funded_a, 1_000);
+    mint_and_fund(&client, &token, &funded_b, 1_000);
+
+    client.cancel_funding();
+
+    // Mix of refundable investors and addresses that never contributed.
+    client.refund_batch(&SorobanVec::from_array(
+        &env,
+        [
+            zero_a.clone(),
+            funded_a.clone(),
+            zero_b.clone(),
+            funded_b.clone(),
+        ],
+    ));
+
+    assert_eq!(token.stellar.balance(&funded_a), 1_000);
+    assert_eq!(token.stellar.balance(&funded_b), 1_000);
+    assert_eq!(
+        token.stellar.balance(&zero_a),
+        0,
+        "zero-contribution address must not receive tokens",
+    );
+    assert_eq!(client.get_distributed_principal(), 2_000);
     assert_invariant(&client, &token);
 }

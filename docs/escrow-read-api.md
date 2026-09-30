@@ -73,6 +73,11 @@ re-implementing storage reads to guarantee identical semantics.
 - [get_distributed_principal](#get_distributed_principal--i128)
 - [get_reconciliation](#get_reconciliation--reconciliationview)
 
+**Fee Governance (Informational Only):**
+- [get_active_fee_schedule](#get_active_fee_schedule--optionfeeschedule)
+- [get_pending_fee_schedule](#get_pending_fee_schedule--optionfeeschedule)
+- [get_previous_fee_schedule](#get_previous_fee_schedule--optionfeeschedule)
+
 ---
 
 ## Core Escrow State
@@ -729,7 +734,7 @@ Returns `true` when the investor has exercised `claim_investor_payout` after set
 
 ### `is_investor_refunded(investor: Address) → bool`
 
-**Storage key:** `DataKey::InvestorRefunded(investor)`  
+**Storage key:** `DataKey::InvestorRefunded(investor)` (persistent)
 **Signature:** `pub fn is_investor_refunded(env: Env, investor: Address) -> bool`
 
 Returns `true` when an investor's principal has been returned via `refund` in a cancelled (status 4) escrow.
@@ -755,25 +760,32 @@ Returns `true` when an investor's principal has been returned via `refund` in a 
 **Storage keys:** `DataKey::FundingCloseSnapshot`, `DataKey::Escrow`  
 **Signature:** `pub fn get_settlement_pool(env: Env) -> i128`
 
-Returns the **total settlement pool** owed by the SME — the aggregate principal plus base-yield
-coupon the SME must repay to fully satisfy all investors. Avoids rounding divergence that arises
-when off-chain tooling re-derives the formula from raw snapshot fields.
+Returns the **total settlement pool** owed by the SME — the aggregate of every investor's
+pro-rata payout, using each investor's own effective yield. Avoids rounding divergence that
+arises when off-chain tooling re-derives the formula from raw snapshot fields.
+
+**Storage keys:** `DataKey::FundingCloseSnapshot`, `DataKey::Escrow`, `DataKey::InvestorIndex`,
+`DataKey::InvestorContribution`, `DataKey::InvestorEffectiveYield`
 
 #### Formula (floor / truncating integer division)
 
 ```text
-coupon       = total_principal × yield_bps / 10_000  (floor)
-settle_pool  = total_principal + coupon
+settle_pool_i = total_principal + total_principal × effective_yield_bps_i / 10_000  (floor)
+payout_i      = contribution_i × settle_pool_i / total_principal   (floor)
+
+get_settlement_pool() = Σ_i payout_i
 ```
 
-Where `total_principal` is from `DataKey::FundingCloseSnapshot` and `yield_bps` is the
-escrow base yield from `InvoiceEscrow::yield_bps`.
+Where `total_principal` is from `DataKey::FundingCloseSnapshot`, `contribution_i` from
+`DataKey::InvestorContribution`, and `effective_yield_bps_i` is the investor's tiered yield
+(`DataKey::InvestorEffectiveYield`) or the escrow base yield (`InvoiceEscrow::yield_bps`).
 
 #### Yield note
 
-Uses the escrow **base yield** only. Per-investor effective yields from `fund_with_commitment`
-tier selection are reflected individually in `compute_investor_payout` but are **not** aggregated
-here.
+The pool is **tier-weighted**, not base-yield. `settle()` still reports the base-yield figure
+(`funded_amount + floor(funded_amount × yield_bps / 10_000)`) in `SettlementResult` /
+`EscrowSettled`; that value is a **lower bound** on the real liability for mixed-tier escrows
+and is informational only. Repayment tooling must use this view.
 
 #### Return values
 
@@ -781,17 +793,24 @@ here.
 |-----------|---------|
 | `DataKey::FundingCloseSnapshot` absent (escrow not yet funded) | `0` |
 | `total_principal <= 0` (degenerate snapshot) | `0` |
-| Normal funded state | `total_principal + floor(total_principal × yield_bps / 10_000)` |
+| No recorded investor (defensive fallback) | `total_principal + floor(total_principal × yield_bps / 10_000)` |
+| Funded state with investors | `Σ_i payout_i` (tier-weighted total liability) |
+
+#### Cost
+
+O(n) over `DataKey::InvestorIndex`, hard-capped at `MAX_UNIQUE_INVESTORS` (10 000).
 
 #### Overflow safety
 
-All multiplications use `i128::checked_mul`; all divisions use `i128::checked_div`. Emits
+All multiplications use `i128::checked_mul`; divisions and the running sum use
+`i128::checked_div` / `i128::checked_add`. Emits
 `EscrowError::ComputePayoutArithmeticOverflow` (code 129) on overflow.
 
 #### Rounding invariant
 
-Sum of all per-investor `compute_investor_payout` values is guaranteed ≤ `get_settlement_pool()`.
-Any fractional residue is swept by `sweep_terminal_dust`.
+`get_settlement_pool()` is the **exact** sum of all per-investor `compute_investor_payout`
+values, so the pool is never under-funded for tiered claims. Any sub-unit residue between
+`settle()`'s base-yield pool and this figure is reclaimed by `sweep_terminal_dust`.
 
 #### Authorization
 
@@ -848,3 +867,96 @@ Single O(1) read view of the current collateral state, so callers never have to 
 | `collateral_limit` | `i128` | Admin-configured ceiling on `record_sme_collateral_commitment` | `MAX_INVOICE_AMOUNT` |
 
 Note that `collateral_limit` is independent of `is_set`: it reflects the stored limit (or the `MAX_INVOICE_AMOUNT` default) even when no commitment exists.
+
+---
+
+## Fee Governance (Informational Only)
+
+> **⚠️ Security Warning:** The fee schedules documented in this section are **informational and governance-tracking only**. They do **NOT** affect actual disbursement calculations. This creates an important trust boundary for auditors.
+
+### Actual Fees Applied
+
+| Entrypoint | Fee source | Behavior |
+|---|---|---|
+| `withdraw()` | `DataKey::ProtocolFeeBps` (immutable, set at `init`) | Splits `funded_amount` according to init-time fee; **ignores all fee schedules** |
+| `release()` | `DataKey::ProtocolFeeBps` (immutable, set at `init`) | Splits each tranche according to init-time fee; **ignores all fee schedules** |
+| `claim_investor_payout()` | Per-investor yield only (no additional protocol fee) | No protocol fee deduction; uses base or tiered yield set at first deposit |
+
+### Fee Schedule Storage (Governance Records)
+
+The following endpoints return fee governance records stored in `FeeScheduleStorageKey`:
+
+```rust
+pub enum FeeScheduleStorageKey {
+    Active,   // Currently active schedule (may be future-dated pending schedule)
+    Pending,  // Pending schedule waiting for activation ledger
+    Previous, // Schedule that was active before a recent activation
+}
+```
+
+These storage keys are **separate from the actual fee system** and exist only for off-chain audit trails and governance transparency.
+
+### `get_active_fee_schedule() → Option<FeeSchedule>`
+
+**Storage key:** `FeeScheduleStorageKey::Active`  
+**Signature:** `pub fn get_active_fee_schedule(env: Env) -> Option<FeeSchedule>`
+
+Returns the active fee schedule for the current ledger, computing any not-yet-promoted boundary activation on the fly.
+
+**Requires initialization:** No  
+**Default when absent:** `None`
+
+**Return value:**
+- `Some(FeeSchedule)` with fields:
+  - `fee_bps: u32` — Configured fee in basis points (0–10,000).
+  - `min_fee_bps: u32` — Minimum enforced fee bound.
+  - `max_fee_bps: u32` — Maximum enforced fee bound.
+  - `activation_ledger: u32` — Ledger sequence number when this schedule became active.
+- `None` when no schedule has been configured (see `submit_fee_schedule`).
+
+**⚠️ Important:** This schedule **does NOT govern `withdraw()` or `release()` payouts**. See the [Actual Fees Applied](#actual-fees-applied) table above. The returned schedule is for governance and off-chain record-keeping only.
+
+### `get_pending_fee_schedule() → Option<FeeSchedule>`
+
+**Storage key:** `FeeScheduleStorageKey::Pending`  
+**Signature:** `pub fn get_pending_fee_schedule(env: Env) -> Option<FeeSchedule>`
+
+Returns the pending fee schedule that will activate at a future ledger, or `None` if no pending schedule exists.
+
+**Requires initialization:** No  
+**Default when absent:** `None`
+
+**Return value:**
+- `Some(FeeSchedule)` with the fields listed above.
+- `None` when no future schedule has been staged.
+
+**Activation condition:** This schedule becomes active (and moves to `Active` storage) once `activation_ledger <= env.ledger().sequence()`. The transition is automatic; no explicit activation call is required.
+
+**⚠️ Important:** Even when `Some(...)`, this pending schedule has **zero effect on current disbursements** because actual fees remain locked to the init-time `DataKey::ProtocolFeeBps`. This view is for governance transparency only.
+
+### `get_previous_fee_schedule() → Option<FeeSchedule>`
+
+**Storage key:** `FeeScheduleStorageKey::Previous`  
+**Signature:** `pub fn get_previous_fee_schedule(env: Env) -> Option<FeeSchedule>`
+
+Returns the previously active fee schedule after a boundary activation, or `None` if no activation has occurred or no prior schedule exists.
+
+**Requires initialization:** No  
+**Default when absent:** `None`
+
+**Lifecycle:**
+1. `submit_fee_schedule(s1)` → `Active = s1`, `Previous = None`
+2. `submit_fee_schedule(s2)` where `s2.activation_ledger` is future → `Active = s1`, `Pending = s2`, `Previous = None`
+3. Ledger advances past `s2.activation_ledger` → `Active = s2`, `Pending = None`, `Previous = s1`
+
+**⚠️ Important:** This historical record is for audit trails and governance tracking. Like `get_active_fee_schedule`, it has **zero effect on actual disbursement calculations**.
+
+### Trust Boundary
+
+Integrators **must not** assume that `get_active_fee_schedule()` returns the fees being applied to investor payouts. Instead:
+
+1. **For auditing:** Query `get_active_fee_schedule`, `get_pending_fee_schedule`, `get_previous_fee_schedule` to track governance decisions and off-chain accounting records.
+2. **For payout calculations:** Use `get_escrow_summary() → protocol_fee_bps`, which reflects the immutable `DataKey::ProtocolFeeBps` set at `init` and used by all disbursals.
+3. **For per-investor payouts:** Use `compute_investor_payout(investor)`, which applies the investor's locked-in yield and the init-time protocol fee, **not** any dynamic schedule.
+
+The separation prevents accidental payout miscalculations if an integration layer assumes dynamic fee governance when the on-chain system uses immutable init-time fees.

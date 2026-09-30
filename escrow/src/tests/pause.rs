@@ -767,3 +767,56 @@ fn scoped_pause_by_non_admin_panics() {
     env.mock_auths(&[]);
     client.set_paused(&true, &PauseScope::Funding, &PauseReason::Security);
 }
+
+// ── 8. cancel_funding (#91) ───────────────────────────────────────────────────
+
+/// `cancel_funding` is a funding-scope state transition and must revert while
+/// the operational pause blocks funding.
+#[test]
+fn cancel_funding_blocked_when_funding_paused() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    init_open(&client, &env, &admin, &sme, "PAU014");
+    client.fund(&investor, &1_000i128);
+    client.set_paused(&true, &PauseScope::Funding, &PauseReason::Incident);
+
+    assert_contract_error(
+        client.try_cancel_funding(&0u32),
+        EscrowError::PausedBlocksCancelFunding,
+    );
+    assert_eq!(
+        client.get_escrow().status,
+        0u32,
+        "escrow must remain open when cancel_funding is paused",
+    );
+}
+
+/// A non-funding pause scope must not block `cancel_funding`.
+#[test]
+fn cancel_funding_unaffected_by_non_funding_pause_scope() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    init_open(&client, &env, &admin, &sme, "PAU015");
+    client.fund(&investor, &1_000i128);
+    client.set_paused(&true, &PauseScope::Claims, &PauseReason::Incident);
+
+    let escrow = client.try_cancel_funding(&0u32).unwrap().unwrap();
+    assert_eq!(escrow.status, 4u32);
+}
+
+/// `cancel_funding` succeeds again once the funding pause is lifted.
+#[test]
+fn cancel_funding_succeeds_after_unpause() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    let investor = Address::generate(&env);
+    init_open(&client, &env, &admin, &sme, "PAU016");
+    client.fund(&investor, &1_000i128);
+    client.set_paused(&true, &PauseScope::Funding, &PauseReason::Incident);
+    client.set_paused(&false, &PauseScope::Funding, &PauseReason::Incident);
+
+    let escrow = client.cancel_funding(&0u32);
+    assert_eq!(escrow.status, 4u32);
+}

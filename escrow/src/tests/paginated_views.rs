@@ -1,6 +1,5 @@
 // Tests for the shared paginate_window helper and the public paginated read views:
-//   get_investors, get_allowlisted_investors, get_revoked_attestation_digests,
-//   get_collateral_records, get_pause_records, and get_settlement_records.
+//   get_investors, get_allowlisted_investors, and get_revoked_attestation_digests.
 //
 // Each test uses a fresh Env so state cannot leak across cases.
 

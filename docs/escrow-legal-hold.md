@@ -84,13 +84,18 @@ Step 2  set_legal_hold(false)   (or clear_legal_hold())
             → clears DataKey::LegalHoldClearableAt on success
 ```
 
-**Typed errors enforced at Step 2:**
+**Typed errors enforced at Step 1 and Step 2:**
 
 | Condition | Error code |
 |---|---|
+| `request_clear_legal_hold` while no hold is active | `LegalHoldNotActive` (153) |
 | `set_legal_hold(false)` without a prior `request_clear_legal_hold` | `LegalHoldClearRequestMissing` (150) |
 | `now < clearable_at` — delay has not elapsed | `LegalHoldClearNotReady` (151) |
 | `now + delay` overflows a `u64` in `request_clear_legal_hold` | `LegalHoldClearDelayOverflow` (152) |
+
+`request_clear_legal_hold` reverts with `LegalHoldNotActive` before the admin
+nonce is consumed, so scheduling a clear for a non-existent hold neither burns
+a nonce nor emits a misleading `LegalHoldClearRequested` event.
 
 **Boundary condition:** the check is `now >= clearable_at` (inclusive). At
 exactly `clearable_at`, the clear is accepted. One ledger-second before it, the
