@@ -2059,6 +2059,26 @@ pub struct MaxPerInvestorCapRaised {
     pub new_cap: i128,
 }
 
+#[contractevent]
+pub struct MaxPerInvestorCapLowered {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_cap: i128,
+    pub new_cap: i128,
+}
+
+#[contractevent]
+pub struct MinContributionFloorRaised {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_floor: i128,
+    pub new_floor: i128,
+}
+
 /// Emitted by [`StarfundEscrow::update_funding_parameters`] after one or more
 /// funding parameters are updated atomically. Each field that changed carries
 /// `Some(new_value)`; unchanged fields are `None`.
@@ -2687,6 +2707,17 @@ pub struct MaturityMaxHorizonUpdated {
 /// monotonically raised. Carries the `invoice_id` and the old/new horizon values.
 #[contractevent]
 pub struct MaturityMaxHorizonRaised {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_horizon: u64,
+    pub new_horizon: u64,
+}
+
+/// Emitted by [`StarfundEscrow::lower_maturity_max_horizon`] after a safe horizon reduction.
+#[contractevent]
+pub struct MaturityMaxHorizonLowered {
     #[topic]
     pub name: Symbol,
     #[topic]
@@ -6333,6 +6364,79 @@ impl StarfundEscrow {
         new_cap
     }
 
+    /// Raises the minimum contribution floor while the escrow is still open.
+    ///
+    /// The floor applies to each subsequent contribution. This is admin-only and requires
+    /// `new_floor` to be positive and strictly greater than the configured floor.
+    pub fn raise_min_contribution_floor(env: Env, new_floor: i128) -> i128 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        guard_status_eq(&env, escrow.status, 0, EscrowError::FloorRaiseNotOpen);
+        ensure(&env, new_floor > 0, EscrowError::NewFloorNotPositive);
+
+        let old_floor: i128 = env
+            .storage()
+            .instance()
+            .get(&keys::min_contribution_floor())
+            .unwrap_or(0);
+        ensure(&env, new_floor > old_floor, EscrowError::NewFloorNotHigher);
+
+        env.storage()
+            .instance()
+            .set(&keys::min_contribution_floor(), &new_floor);
+
+        MinContributionFloorRaised {
+            name: symbol_short!("floor_hi"),
+            invoice_id: escrow.invoice_id,
+            old_floor,
+            new_floor,
+        }
+        .publish(&env);
+
+        new_floor
+    }
+
+    /// Lowers the configured per-investor contribution cap while the escrow is open.
+    ///
+    /// Admin-only. A cap must already be configured, and `new_cap` must be positive and
+    /// strictly less than the current cap. The lower cap applies to subsequent deposits.
+    pub fn lower_max_per_investor(env: Env, new_cap: i128) -> i128 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        guard_status_eq(
+            &env,
+            escrow.status,
+            0,
+            EscrowError::PerInvestorCapLowerNotOpen,
+        );
+        ensure(&env, new_cap > 0, EscrowError::MaxPerInvestorCapNotPositive);
+
+        let old_cap: i128 = env
+            .storage()
+            .instance()
+            .get(&keys::max_per_investor_cap())
+            .unwrap_or_else(|| fail(&env, EscrowError::MaxPerInvestorCapNotConfigured));
+        ensure(
+            &env,
+            new_cap < old_cap,
+            EscrowError::MaxPerInvestorCapNotLowered,
+        );
+
+        env.storage()
+            .instance()
+            .set(&keys::max_per_investor_cap(), &new_cap);
+
+        MaxPerInvestorCapLowered {
+            name: symbol_short!("inv_cap"),
+            invoice_id: escrow.invoice_id,
+            old_cap,
+            new_cap,
+        }
+        .publish(&env);
+
+        new_cap
+    }
+
     /// Validate the stored schema version and apply a migration if one is implemented.
     ///
     /// # Behavior - **typed error on all current paths**
@@ -7885,6 +7989,59 @@ impl StarfundEscrow {
 
         MaturityMaxHorizonRaised {
             name: symbol_short!("mtry_rse"),
+            invoice_id: escrow.invoice_id,
+            old_horizon,
+            new_horizon,
+        }
+        .publish(&env);
+
+        new_horizon
+    }
+
+    /// Lowers the maturity-max-horizon ceiling without invalidating the escrow's current maturity.
+    ///
+    /// Requires admin authorization and a strictly smaller horizon. The proposed ceiling must
+    /// still reach the existing absolute maturity timestamp (`now + new_horizon >= maturity`).
+    ///
+    /// # Errors
+    /// - [`EscrowError::HorizonNotLowered`] if `new_horizon` is not strictly below the current
+    ///   horizon.
+    /// - [`EscrowError::MaturityExceedsMaxHorizon`] if the proposed ceiling would invalidate the
+    ///   current maturity or computing the ceiling overflows.
+    ///
+    /// # Events
+    /// Emits [`MaturityMaxHorizonLowered`] with the old and new horizons.
+    pub fn lower_maturity_max_horizon(env: Env, new_horizon: u64) -> u64 {
+        let escrow = Self::load_escrow_require_admin(&env);
+
+        let old_horizon = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::MaturityMaxHorizon)
+            .unwrap_or(DEFAULT_MATURITY_MAX_HORIZON_SECS);
+        ensure(
+            &env,
+            new_horizon < old_horizon,
+            EscrowError::HorizonNotLowered,
+        );
+
+        let latest_allowed_maturity = env
+            .ledger()
+            .timestamp()
+            .checked_add(new_horizon)
+            .unwrap_or_else(|| fail(&env, EscrowError::MaturityExceedsMaxHorizon));
+        ensure(
+            &env,
+            escrow.maturity <= latest_allowed_maturity,
+            EscrowError::MaturityExceedsMaxHorizon,
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MaturityMaxHorizon, &new_horizon);
+
+        MaturityMaxHorizonLowered {
+            name: symbol_short!("mtry_lwr"),
             invoice_id: escrow.invoice_id,
             old_horizon,
             new_horizon,
