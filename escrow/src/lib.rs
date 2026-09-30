@@ -1479,6 +1479,12 @@ pub enum DataKey {
     /// reads as `false`. Written by the dispute lifecycle (admin/off-chain) and checked by
     /// [`StarfundEscrow::close_escrow`].
     Dispute,
+    /// Running total of principal released to the SME; absent ⇒ `0` for legacy instances.
+    ReleasedAmount,
+    /// Expected nonce for admin replay protection; absent ⇒ `0`.
+    AdminNonce,
+    /// Funding-token decimal scale used to validate token amounts; absent until initialization.
+    FundingTokenScale,
 }
 
 // --- Data types ---
