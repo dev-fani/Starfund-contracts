@@ -55,6 +55,42 @@ Emitted when admin calls `lower_max_unique_investors` while the escrow is open.
 - `old_cap` (u32)
 - `new_cap` (u32)
 
+### `MinContributionFloorRaised` and `MinContributionFloorLowered`
+Emitted when an admin raises or lowers the per-deposit minimum contribution floor while the
+escrow is open.
+
+**Topics:**
+1. `floor_hi` or `floor_lo` (Symbol)
+2. `invoice_id` (Symbol)
+
+**Data Payload:**
+- `old_floor` (i128)
+- `new_floor` (i128)
+
+### `MaxPerInvestorCapRaised` and `MaxPerInvestorCapLowered`
+Emitted when an admin raises or lowers the cumulative per-investor contribution cap while the
+escrow is open.
+
+**Topics:**
+1. `inv_cap` (Symbol)
+2. `invoice_id` (Symbol)
+
+**Data Payload:**
+- `old_cap` (i128)
+- `new_cap` (i128)
+
+### `MaturityMaxHorizonRaised` and `MaturityMaxHorizonLowered`
+Emitted when an admin adjusts the maximum maturity horizon. Lowering is rejected if the
+proposed horizon would invalidate the escrow's current maturity.
+
+**Topics:**
+1. `mtry_rse` or `mtry_lwr` (Symbol)
+2. `invoice_id` (Symbol)
+
+**Data Payload:**
+- `old_horizon` (u64)
+- `new_horizon` (u64)
+
 ### `EscrowFunded`
 Emitted when an investor deposits principal.
 
@@ -147,6 +183,39 @@ Emitted when the admin extends an existing funding deadline while the escrow is 
   "topics": ["fund_ext", "INV_001"],
   "data": {
     "old_deadline": 1714180000,
+    "new_deadline": 1714183600
+  }
+}
+```
+
+### `FundingDeadlineUpdated`
+Emitted by `update_funding_deadline` whenever the admin sets or clears the
+funding deadline while the escrow is open.
+
+**Topics:**
+1. `fund_dl` (Symbol)
+2. `invoice_id` (Symbol)
+
+**Data Payload:**
+- `prior_deadline` (`Option<u64>`): the previously configured ledger timestamp,
+  or `None` when no deadline was configured.
+- `new_deadline` (`Option<u64>`): the new ledger timestamp, or `None` when the
+  deadline was cleared.
+
+**Emission semantics:**
+- `Some(d)` stores `d` after verifying it is later than the current ledger
+  timestamp.
+- `None` removes the stored deadline and allows funding without a time limit.
+- The event is emitted after the storage update and includes both the previous
+  and resulting values, so indexers can represent set, replace, and clear
+  operations without an additional read.
+
+**Example (JSON Decoded):**
+```json
+{
+  "topics": ["fund_dl", "INV_001"],
+  "data": {
+    "prior_deadline": 1714180000,
     "new_deadline": 1714183600
   }
 }
