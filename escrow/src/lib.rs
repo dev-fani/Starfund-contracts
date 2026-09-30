@@ -1053,6 +1053,10 @@ pub enum EscrowError {
     PayerRecoveryNotOpen = 264,
     /// [`StarfundEscrow::propose_payer_recovery`] nominated the current payer address.
     NewPayerSameAsCurrent = 265,
+    /// [`StarfundEscrow::withdraw`] called when remaining funded amount is zero.
+    NothingToWithdraw = 266,
+    /// [`StarfundEscrow::cancel_funding`] called while a dispute remains active.
+    DisputeBlocksCancelFunding = 267,
 }
 
 #[inline(always)]
@@ -2337,6 +2341,17 @@ pub struct YieldBpsUpdatedEvent {
     pub invoice_id: Symbol,
     pub old_yield_bps: i64,
     pub new_yield_bps: i64,
+}
+
+/// Emitted by [`StarfundEscrow::set_storage_limit`] when the storage TTL limit is updated.
+#[contractevent]
+pub struct StorageLimitUpdatedEvent {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub old_limit: u32,
+    pub new_limit: u32,
 }
 
 #[contractevent]
@@ -7143,7 +7158,11 @@ impl StarfundEscrow {
         guard_not_disputed(&env, EscrowError::DisputeBlocksSettlement);
 
         // env.clone(): env is used again after this call for ledger timestamp, storage set, and publish.
-        let mut escrow = Self::load_escrow_require_sme(&env);
+        let mut escrow: InvoiceEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow)
+            .unwrap_or_else(|| fail(&env, EscrowError::EscrowNotInitialized));
 
         // Once-only settlement guard. `settle` transitions status 1 ΓåÆ 2 and is the only
         // writer of the `SettledAt` marker, so `status == 2` uniquely identifies an escrow
@@ -7220,7 +7239,7 @@ impl StarfundEscrow {
     /// Batch settle entrypoint: settle multiple escrows in a single call.
     ///
     /// Each address is processed sequentially. All existing [`StarfundEscrow::settle`]
-    /// invariants (pause gate, legal hold, SME auth, funded status, maturity check, and the
+    /// invariants (pause gate, legal hold, funded status, maturity check, and the
     /// once-only [`EscrowError::EscrowAlreadySettled`] guard) are enforced per entry. The
     /// entire batch is atomic: if any escrow fails to settle, the entire call reverts.
     ///
@@ -7464,6 +7483,7 @@ impl StarfundEscrow {
             .get(&keys::released_amount())
             .unwrap_or(0);
         let amount = escrow.funded_amount.checked_sub(released_amount).unwrap();
+        ensure(&env, amount > 0, EscrowError::NothingToWithdraw);
         let sme = escrow.sme_address.clone();
 
         // Immutable protocol fee split. `fee = funded_amount * fee_bps / 10_000` (floor), with the
@@ -8321,8 +8341,9 @@ impl StarfundEscrow {
     ///
     /// # Returns
     /// The newly stored limit.
-    pub fn set_storage_limit(env: Env, limit: u32) -> u32 {
-        let _escrow = Self::load_escrow_require_admin(&env);
+    pub fn set_storage_limit(env: Env, limit: u32, expected_nonce: u32) -> u32 {
+        let escrow = Self::load_escrow_require_admin(&env);
+        Self::consume_admin_nonce(&env, expected_nonce);
 
         ensure(
             &env,
@@ -8330,7 +8351,21 @@ impl StarfundEscrow {
             EscrowError::StorageLimitOutOfRange,
         );
 
+        let old_limit: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageLimit)
+            .unwrap_or(INSTANCE_TTL_MIN_EXTENSION_LEDGERS);
+
         env.storage().instance().set(&DataKey::StorageLimit, &limit);
+
+        StorageLimitUpdatedEvent {
+            name: symbol_short!("stg_lim"),
+            invoice_id: escrow.invoice_id.clone(),
+            old_limit,
+            new_limit: limit,
+        }
+        .publish(&env);
 
         limit
     }
