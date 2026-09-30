@@ -2801,8 +2801,11 @@ fn auth_audit_request_clear_legal_hold_requires_admin() {
     let (client, admin, sme) = setup(&env);
     env.mock_all_auths();
     default_init(&client, &env, &admin, &sme);
+    // A clear request is only valid while a hold is active; activate one so the failure
+    // under test is the missing admin auth, not the active-hold precondition.
+    client.set_legal_hold(&true, &0u32);
     env.mock_auths(&[]);
-    client.request_clear_legal_hold(&0u32);
+    client.request_clear_legal_hold(&1u32);
 }
 
 #[test]
@@ -3591,6 +3594,7 @@ fn test_error_code_uniqueness() {
         EscrowError::LegalHoldClearRequestMissing as u32,
         EscrowError::LegalHoldClearNotReady as u32,
         EscrowError::LegalHoldClearDelayOverflow as u32,
+        EscrowError::LegalHoldNotActive as u32,
         EscrowError::FundingDeadlinePassed as u32,
         EscrowError::LegalHoldBlocksBeneficiaryRotation as u32,
         EscrowError::RotationNotOpen as u32,

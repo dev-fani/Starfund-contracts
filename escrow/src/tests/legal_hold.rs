@@ -421,6 +421,28 @@ fn request_clear_legal_hold_by_admin_succeeds_with_zero_delay() {
     assert!(!client.get_legal_hold());
 }
 
+/// `request_clear_legal_hold` must revert with [`EscrowError::LegalHoldNotActive`]
+/// when no hold is active, so no admin nonce is burned and no misleading
+/// `LegalHoldClearRequested` event is emitted for a non-existent hold.
+#[test]
+fn request_clear_legal_hold_without_active_hold_fails() {
+    let env = Env::default();
+    let (client, admin, sme) = setup(&env);
+    init_open_with_clear_delay(&client, &env, &admin, &sme, "LHR005", Some(0));
+    assert!(!client.get_legal_hold());
+
+    assert_contract_error(
+        client.try_request_clear_legal_hold(&1u32),
+        EscrowError::LegalHoldNotActive,
+    );
+    // No clear window was scheduled.
+    assert!(client.get_legal_hold_clearable_at().is_none());
+    // The admin nonce was not consumed, so the same nonce is still usable.
+    client.set_legal_hold(&true, &0u32);
+    client.request_clear_legal_hold(&1u32);
+    assert!(client.get_legal_hold_clearable_at().is_some());
+}
+
 #[test]
 #[should_panic]
 fn request_clear_legal_hold_by_non_admin_panics() {

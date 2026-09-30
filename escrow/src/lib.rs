@@ -841,6 +841,8 @@ pub enum EscrowError {
     LegalHoldClearNotReady = 151,
     /// Computing the legal-hold clear ready-at timestamp would overflow.
     LegalHoldClearDelayOverflow = 152,
+    /// [`StarfundEscrow::request_clear_legal_hold`] called while no legal hold is active.
+    LegalHoldNotActive = 153,
     /// Funding deadline has passed, new deposits are rejected.
     FundingDeadlinePassed = 164,
 
@@ -5777,8 +5779,16 @@ impl StarfundEscrow {
     ///
     /// | Condition | Typed error |
     /// |-----------|-------------|
+    /// | no legal hold is active | [`EscrowError::LegalHoldNotActive`] |
     /// | `timestamp + delay` overflows | [`EscrowError::LegalHoldClearDelayOverflow`] |
     pub fn request_clear_legal_hold(env: Env, expected_nonce: u32) {
+        // A clear request is only meaningful while a hold is active; scheduling one for a
+        // non-existent hold would burn an admin nonce and emit a misleading event.
+        ensure(
+            &env,
+            Self::legal_hold_active(&env),
+            EscrowError::LegalHoldNotActive,
+        );
         let escrow = Self::load_escrow_require_admin(&env);
         Self::consume_admin_nonce(&env, expected_nonce);
 
@@ -7009,12 +7019,6 @@ impl StarfundEscrow {
     /// dedicated [`EscrowError::EscrowAlreadySettled`] typed error.
     pub fn settle(env: Env) -> SettlementResult {
         // Operational pause gate (read-only), before require_auth and orthogonal to legal hold.
-        ensure(
-            &env,
-            !Self::paused_blocks(&env, PauseEntry::Settlement),
-            EscrowError::PausedBlocksSettlement,
-        );
-        // Operational pause gate (read-only), before require_auth and orthogonal to legal hold.
         guard_not_paused(
             &env,
             EscrowError::PausedBlocksSettlement,
@@ -7336,12 +7340,6 @@ impl StarfundEscrow {
     /// - [`EscrowError::WithdrawFeeArithmeticOverflow`] ΓÇö `funded_amount * fee_bps` overflowed `i128`.
     /// - [`EscrowError::WithdrawNetArithmeticUnderflow`] ΓÇö `funded_amount - fee` underflowed (unreachable for in-range `fee_bps`).
     pub fn withdraw(env: Env) -> InvoiceEscrow {
-        // Operational pause gate (read-only), orthogonal to legal hold.
-        ensure(
-            &env,
-            !Self::paused_blocks(&env, PauseEntry::Withdrawal),
-            EscrowError::PausedBlocksWithdrawal,
-        );
         // Operational pause gate (read-only), before require_auth and orthogonal to legal hold.
         guard_not_paused(
             &env,
