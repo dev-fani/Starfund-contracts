@@ -815,6 +815,21 @@ pub enum EscrowError {
     /// The proposed new SME address is identical to the current beneficiary.
     NewSmeSameAsCurrent = 162,
 
+    /// A legal hold blocks rotating the payer address.
+    LegalHoldBlocksPayerRotation = 163,
+    /// Payer rotation was attempted while the escrow was not in a pre-settlement state
+    /// (`status` must be 0 = open or 1 = funded).
+    PayerRotationNotOpen = 178,
+    /// The proposed new payer address is identical to the current payer.
+    NewPayerSameAsCurrent = 179,
+    /// [`StarfundEscrow::rotate_payer`] blocked while operational pause is active.
+    PausedBlocksPayerRotation = 180,
+    /// [`StarfundEscrow::rotate_payer`] blocked while a dispute is active.
+    DisputeBlocksPayerRotation = 181,
+    /// [`StarfundEscrow::rotate_payer`] called after funding has commenced; the payer
+    /// address is immutable once `funded_amount > 0`.
+    PayerImmutableAfterFunding = 182,
+
     /// Attempted to accept admin role when no pending admin exists.
     /// @dev Historical note: Prior to PR #XYZ, this shared discriminant 163 with `FundingDeadlinePassed`.
     /// Reassigned to 81 to maintain uniqueness within the admin-handover range.
@@ -3672,22 +3687,28 @@ impl StarfundEscrow {
 
     /// Rotate the payer address that must authorize funding.
     ///
-    /// Permitted only before settlement (`status` 0 = open or 1 = funded) and
-    /// while no legal hold is active. Requires authorization from **both** the
+    /// Permitted only before settlement (`status` 0 = open or 1 = funded), before any
+    /// funding has commenced (`funded_amount == 0`), and while no legal hold, operational
+    /// pause, or active dispute is in effect. Requires authorization from **both** the
     /// current payer and the admin, so the payer can never be changed unilaterally.
-    /// A no-op rotation to the current address is rejected. Emits
-    /// [`PayerRotated`] with the prior and new addresses and returns the
-    /// updated escrow snapshot.
+    /// A no-op rotation to the current address is rejected. Emits [`PayerRotated`] with
+    /// the prior and new addresses and returns the updated escrow snapshot.
     ///
     /// # Errors
     ///
     /// | Condition | Typed error |
     /// |-----------|-------------|
     /// | Legal hold active | [`EscrowError::LegalHoldBlocksPayerRotation`] |
+    /// | Operational pause active | [`EscrowError::PausedBlocksPayerRotation`] |
+    /// | Dispute active | [`EscrowError::DisputeBlocksPayerRotation`] |
     /// | Escrow not open or funded | [`EscrowError::PayerRotationNotOpen`] |
+    /// | Funding has commenced (`funded_amount > 0`) | [`EscrowError::PayerImmutableAfterFunding`] |
     /// | `new_payer == current payer` | [`EscrowError::NewPayerSameAsCurrent`] |
     pub fn rotate_payer(env: Env, new_payer: Address) -> InvoiceEscrow {
+        // Gates run before auth and storage mutation (read-only preconditions).
         Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksPayerRotation);
+        guard_not_paused(&env, EscrowError::PausedBlocksPayerRotation, PauseEntry::Funding);
+        guard_not_disputed(&env, EscrowError::DisputeBlocksPayerRotation);
 
         let mut escrow = Self::get_escrow(env.clone());
 
@@ -3695,6 +3716,14 @@ impl StarfundEscrow {
             &env,
             escrow.status == 0 || escrow.status == 1,
             EscrowError::PayerRotationNotOpen,
+        );
+
+        // Payer is immutable once any funding has been recorded; mirrors the immutability
+        // check enforced by rotate_beneficiary (EscrowError::BeneficiaryImmutableAfterFunding).
+        ensure(
+            &env,
+            escrow.funded_amount == 0,
+            EscrowError::PayerImmutableAfterFunding,
         );
 
         ensure(
@@ -7301,10 +7330,27 @@ impl StarfundEscrow {
     /// # Formula (floor / truncating integer division)
     ///
     /// ```text
-    /// coupon       = total_principal ├ù effective_yield_bps / 10_000  (floor)
+    /// coupon       = total_principal × effective_yield_bps / 10_000  (floor)
     /// settle_pool  = total_principal + coupon
-    /// gross_payout = contribution ├ù settle_pool / total_principal     (floor)
+    /// gross_payout = contribution × settle_pool / total_principal     (floor)
     /// ```
+    ///
+    /// # Rounding residue
+    ///
+    /// Both divisions use **truncating (floor) integer arithmetic**, which means each
+    /// investor's payout is rounded down to the nearest base unit. Across all investors
+    /// this produces a cumulative rounding residue:
+    ///
+    /// ```text
+    /// residue = settle_pool − Σ gross_payout_i  (≥ 0)
+    /// ```
+    ///
+    /// The residue is bounded by the number of unique investors (at most one base unit
+    /// lost per investor per division step) and is never negative. It accumulates in the
+    /// contract balance after all investors have claimed and is swept by
+    /// [`StarfundEscrow::sweep_terminal_dust`] once the escrow reaches a terminal state.
+    /// Off-chain tooling must account for this residue when reconciling the settlement
+    /// pool against the sum of individual payouts.
     ///
     /// # Returns
     ///
@@ -7314,7 +7360,7 @@ impl StarfundEscrow {
     ///
     /// # Invariant
     ///
-    /// The sum of `compute_investor_payout` over all investors is Γëñ `total_principal + coupon`;
+    /// The sum of `compute_investor_payout` over all investors is ≤ `total_principal + coupon`;
     /// any rounding residual is swept by [`StarfundEscrow::sweep_terminal_dust`].
     ///
     /// # Overflow safety
@@ -7325,7 +7371,7 @@ impl StarfundEscrow {
     ///
     /// # Authorization
     ///
-    /// None ΓÇö pure read; no auth required.
+    /// None — pure read; no auth required.
     pub fn compute_investor_payout(env: Env, investor: Address) -> i128 {
         // Contribution fetch: returns 0 for non-participants without panicking.
         let contribution: i128 = Self::get_persistent_investor_contribution(&env, investor.clone());
@@ -7354,7 +7400,10 @@ impl StarfundEscrow {
             Self::get_persistent_investor_effective_yield(&env, investor.clone())
                 .unwrap_or(escrow.yield_bps);
 
-        // coupon = total_principal ├ù effective_yield_bps / 10_000  (floor)
+        // coupon = total_principal × effective_yield_bps / 10_000  (truncating floor division)
+        // Rounding: the remainder (total_principal × effective_yield_bps % 10_000) is silently
+        // discarded here. This is intentional — the residue accumulates in the contract balance
+        // and is swept by sweep_terminal_dust after all investors claim.
         let coupon = total_principal
             .checked_mul(effective_yield_bps as i128)
             .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
@@ -7365,7 +7414,10 @@ impl StarfundEscrow {
             .checked_add(coupon)
             .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow));
 
-        // gross_payout = contribution ├ù settle_pool / total_principal  (floor)
+        // gross_payout = contribution × settle_pool / total_principal  (truncating floor division)
+        // Rounding: each investor's payout is rounded down by at most 1 base unit. The cumulative
+        // residue across all investors (≥ 0) is bounded by the investor count and is swept by
+        // sweep_terminal_dust. See "# Rounding residue" in the function-level doc comment.
         contribution
             .checked_mul(settle_pool)
             .unwrap_or_else(|| fail(&env, EscrowError::ComputePayoutArithmeticOverflow))
