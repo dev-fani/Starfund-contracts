@@ -5839,6 +5839,7 @@ impl StarfundEscrow {
     pub fn set_investor_allowlisted(env: Env, investor: Address, allowed: bool, expected_nonce: u32) {
         let escrow = Self::load_escrow_require_admin(&env);
         Self::consume_admin_nonce(&env, expected_nonce);
+        let was_allowlisted = Self::is_investor_allowlisted(env.clone(), investor.clone());
         env.storage()
             .persistent()
             .set(&DataKey::InvestorAllowlisted(investor.clone()), &allowed);
@@ -8096,8 +8097,10 @@ impl StarfundEscrow {
             .publish(&env);
         }
 
-        let window = validity_window_secs.unwrap_or(DEFAULT_ADMIN_PROPOSAL_VALIDITY_SECS);
-        let expiry = env.ledger().timestamp().saturating_add(window);
+        let expiry = env
+            .ledger()
+            .timestamp()
+            .saturating_add(DEFAULT_ADMIN_PROPOSAL_VALIDITY_SECS);
 
         env.storage()
             .instance()
