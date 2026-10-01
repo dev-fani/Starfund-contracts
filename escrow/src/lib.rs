@@ -424,6 +424,15 @@ pub const MAX_INVESTOR_ALLOWLIST_BATCH: u32 = 32;
 /// Upper bound on [`StarfundEscrow::get_contributions`] / investor read batch size.
 pub const MAX_INVESTOR_READ_BATCH: u32 = 50;
 
+/// Number of addresses stored per [`DataKey::AllowlistPage`] entry.
+///
+/// The allowlist index is split across fixed-size **persistent** pages so that
+/// no single ledger entry — and no instance-storage slot — ever holds an
+/// unbounded address collection. The page size is aligned with
+/// [`MAX_INVESTOR_READ_BATCH`] so a single page maps to at most one bounded read
+/// batch during paginated enumeration.
+pub const ALLOWLIST_PAGE_SIZE: u32 = 50;
+
 /// Hard ceiling on the number of distinct investors appended to [`DataKey::InvestorIndex`],
 /// enforced **unconditionally** in [`StarfundEscrow::fund_impl`] for every new contributor,
 /// independent of the optional `max_unique_investors` init cap.
@@ -875,6 +884,10 @@ pub enum EscrowError {
     /// [`StarfundEscrow::rotate_payer`] called after funding has commenced; the payer
     /// address is immutable once `funded_amount > 0`.
     PayerImmutableAfterFunding = 182,
+    /// [`StarfundEscrow::rotate_beneficiary`] blocked while an operational pause is active.
+    PausedBlocksBeneficiaryRotation = 183,
+    /// [`StarfundEscrow::rotate_beneficiary`] blocked while a dispute is active.
+    DisputeBlocksBeneficiaryRotation = 184,
 
     /// Attempted to accept admin role when no pending admin exists.
     /// @dev Historical note: Prior to PR #XYZ, this shared discriminant 163 with `FundingDeadlinePassed`.
@@ -1517,6 +1530,19 @@ pub enum DataKey {
     AdminNonce,
     /// Funding-token decimal scale used to validate token amounts; absent until initialization.
     FundingTokenScale,
+    /// Persistent, fixed-size page of the allowlist index; `AllowlistPage(page)`
+    /// holds up to [`ALLOWLIST_PAGE_SIZE`] addresses. This replaces the former
+    /// unbounded [`DataKey::AllowlistIndex`] instance vector so instance storage
+    /// holds only bounded scalars. Absent ⇒ empty page.
+    ///
+    /// **Additive key (ADR-007):** appended after all pre-existing variants so
+    /// existing discriminants are unchanged.
+    AllowlistPage(u32),
+    /// Instance-storage count of addresses in the paged allowlist index (its
+    /// length). Absent ⇒ `0`. Maintained by the allowlist writers so that
+    /// [`StarfundEscrow::get_allowlisted_investors_count`] is `O(1)` and never
+    /// scans persistent storage.
+    AllowlistCount,
 }
 
 // --- Data types ---
@@ -1556,17 +1582,24 @@ pub(crate) enum PauseEntry {
     Settlement = 1,
     Withdrawal = 2,
     Claims = 3,
+    /// Admin lifecycle operations (beneficiary / payer rotation) that must be
+    /// frozen by **any** active pause, regardless of the pause's stored scope.
+    Admin = 4,
 }
 
 impl PauseScope {
     /// Whether an active pause with this scope blocks an operation from `entry`.
     ///
     /// [`PauseScope::All`] blocks every entry; otherwise the pause blocks only the
-    /// entry whose family matches its scope.
+    /// entry whose family matches its scope. An admin-family entry
+    /// ([`PauseEntry::Admin`]) is blocked by **any** active pause so that
+    /// administrative rotations are frozen as soon as the escrow is paused for any
+    /// reason.
     pub(crate) fn blocks(self, entry: PauseEntry) -> bool {
         matches!(
             (self, entry),
             (PauseScope::All, _)
+                | (_, PauseEntry::Admin)
                 | (PauseScope::Funding, PauseEntry::Funding)
                 | (PauseScope::Settlement, PauseEntry::Settlement)
                 | (PauseScope::Withdrawal, PauseEntry::Withdrawal)
@@ -3804,22 +3837,35 @@ impl StarfundEscrow {
     /// settlement / `withdraw`.
     ///
     /// Permitted only before settlement (`status` 0 = open or 1 = funded) and
-    /// while no legal hold is active. Requires authorization from **both** the
-    /// current SME and the admin, so the payout destination can never be changed
-    /// unilaterally. A no-op rotation to the current address is rejected. Emits
-    /// [`BeneficiaryRotated`] with the prior and new addresses and returns the
-    /// updated escrow snapshot.
+    /// while no legal hold, operational pause, or active dispute is in effect.
+    /// Requires authorization from **both** the current SME and the admin, so the
+    /// payout destination can never be changed unilaterally. A no-op rotation to
+    /// the current address is rejected. Emits [`BeneficiaryRotated`] with the prior
+    /// and new addresses and returns the updated escrow snapshot.
     ///
     /// # Errors
     ///
     /// | Condition | Typed error |
     /// |-----------|-------------|
     /// | Legal hold active | [`EscrowError::LegalHoldBlocksBeneficiaryRotation`] |
+    /// | Operational pause active | [`EscrowError::PausedBlocksBeneficiaryRotation`] |
+    /// | Dispute active | [`EscrowError::DisputeBlocksBeneficiaryRotation`] |
     /// | Escrow not open or funded | [`EscrowError::RotationNotOpen`] |
     /// | `new_sme_address == current SME` | [`EscrowError::NewSmeSameAsCurrent`] |
     pub fn rotate_beneficiary(env: Env, new_sme_address: Address, expected_nonce: u32) -> InvoiceEscrow {
         // Legal-hold gate (read-only).
         guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksBeneficiaryRotation);
+        // Operational pause gate (read-only): any active pause freezes admin
+        // rotations so compromised-credential freezes cannot be bypassed by
+        // redirecting SME disbursements.
+        guard_not_paused(
+            &env,
+            EscrowError::PausedBlocksBeneficiaryRotation,
+            PauseEntry::Admin,
+        );
+        // Dispute gate (read-only): never redirect future SME disbursements while a
+        // dispute is being adjudicated.
+        guard_not_disputed(&env, EscrowError::DisputeBlocksBeneficiaryRotation);
 
         let mut escrow = Self::get_escrow(env.clone());
 
@@ -5934,6 +5980,120 @@ impl StarfundEscrow {
             .unwrap_or(false)
     }
 
+    /// Read the length of the paged allowlist index.
+    ///
+    /// This is an `O(1)` instance-storage read — it never scans persistent
+    /// storage — and is used both as the allowlisted-count and to bound allowlist
+    /// pagination windows.
+    fn allowlist_index_len(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AllowlistCount)
+            .unwrap_or(0)
+    }
+
+    /// Load one persistent allowlist page; absent ⇒ empty.
+    fn allowlist_page(env: &Env, page: u32) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AllowlistPage(page))
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Persist one allowlist page and extend its TTL.
+    fn set_allowlist_page(env: &Env, page: u32, entries: &Vec<Address>) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::AllowlistPage(page), entries);
+        env.storage().persistent().extend_ttl(
+            &DataKey::AllowlistPage(page),
+            PERSISTENT_TTL_MIN_EXTENSION_LEDGERS,
+            PERSISTENT_TTL_MIN_EXTENSION_LEDGERS,
+        );
+    }
+
+    /// Append `addr` to the paged allowlist index and increment the length counter.
+    ///
+    /// The index is append-only on membership transitions, so the target slot is
+    /// always the current length; a new page is created lazily when the previous
+    /// one fills up.
+    fn allowlist_index_append(env: &Env, addr: Address) {
+        let len = Self::allowlist_index_len(env);
+        let page = len / ALLOWLIST_PAGE_SIZE;
+        let mut entries = Self::allowlist_page(env, page);
+        entries.push_back(addr);
+        Self::set_allowlist_page(env, page, &entries);
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowlistCount, &(len + 1));
+    }
+
+    /// Remove `addr` from the paged allowlist index, preserving the relative order
+    /// of the remaining entries (INV-AL-04a).
+    ///
+    /// Returns `true` when the address was present. Entries after the removed slot
+    /// are shifted left across page boundaries so enumeration order stays stable.
+    fn allowlist_index_remove(env: &Env, addr: &Address) -> bool {
+        let len = Self::allowlist_index_len(env);
+        if len == 0 {
+            return false;
+        }
+
+        let last_page = (len - 1) / ALLOWLIST_PAGE_SIZE;
+
+        // Locate the page/offset holding `addr`.
+        let mut target: Option<(u32, u32)> = None;
+        let mut page = 0u32;
+        while page <= last_page {
+            let entries = Self::allowlist_page(env, page);
+            let mut offset = 0u32;
+            while offset < entries.len() {
+                if entries.get(offset).unwrap() == *addr {
+                    target = Some((page, offset));
+                    break;
+                }
+                offset += 1;
+            }
+            if target.is_some() {
+                break;
+            }
+            page += 1;
+        }
+
+        let (target_page, mut offset) = match target {
+            Some(t) => t,
+            None => return false,
+        };
+
+        // Shift every entry after the removed slot one position left, pulling the
+        // first entry of the next page into the tail of the current page.
+        let mut page = target_page;
+        loop {
+            let mut entries = Self::allowlist_page(env, page);
+            entries.remove(offset);
+            if page == last_page {
+                if entries.is_empty() {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::AllowlistPage(page));
+                } else {
+                    Self::set_allowlist_page(env, page, &entries);
+                }
+                break;
+            }
+            let next = Self::allowlist_page(env, page + 1);
+            entries.push_back(next.get(0).unwrap());
+            Self::set_allowlist_page(env, page, &entries);
+            page += 1;
+            offset = 0;
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowlistCount, &(len - 1));
+        true
+    }
+
     /// Set whether a specific investor address is allowlisted.
     ///
     /// Writes a boolean entry to **persistent** storage under [`DataKey::InvestorAllowlisted`].
@@ -5971,28 +6131,13 @@ impl StarfundEscrow {
             .persistent()
             .set(&DataKey::InvestorAllowlisted(investor.clone()), &allowed);
 
-        // Maintain the allowlist index
-        let mut index: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistIndex)
-            .unwrap_or_else(|| Vec::new(&env));
-
+        // Maintain the paged index and its O(1) length counter; only membership
+        // edge transitions change the index.
         if allowed && !was_allowlisted {
-            index.push_back(investor.clone());
+            Self::allowlist_index_append(&env, investor.clone());
         } else if !allowed && was_allowlisted {
-            // Remove from index by position
-            for i in 0..index.len() {
-                if index.get(i).unwrap() == investor {
-                    index.remove(i);
-                    break;
-                }
-            }
+            Self::allowlist_index_remove(&env, &investor);
         }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::AllowlistIndex, &index);
 
         InvestorAllowlistChanged {
             name: symbol_short!("al_set"),
@@ -6032,13 +6177,6 @@ impl StarfundEscrow {
             EscrowError::InvestorBatchTooLarge,
         );
 
-        // Load index once for the entire batch
-        let mut index: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistIndex)
-            .unwrap_or_else(|| Vec::new(&env));
-
         for i in 0..n {
             let inv = investors.get(i).unwrap();
 
@@ -6052,15 +6190,13 @@ impl StarfundEscrow {
                 .persistent()
                 .set(&DataKey::InvestorAllowlisted(inv.clone()), &allowed);
 
+            // Persist each membership edge to the paged index so batch writes are
+            // visible to `get_allowlisted_investors` / `get_allowlisted_investors_count`,
+            // exactly like the single-address path.
             if allowed && !was_allowlisted {
-                index.push_back(inv.clone());
+                Self::allowlist_index_append(&env, inv.clone());
             } else if !allowed && was_allowlisted {
-                for j in 0..index.len() {
-                    if index.get(j).unwrap() == inv {
-                        index.remove(j);
-                        break;
-                    }
-                }
+                Self::allowlist_index_remove(&env, &inv);
             }
 
             InvestorAllowlistChanged {
@@ -6082,8 +6218,9 @@ impl StarfundEscrow {
 
     /// Returns a paginated list of allowlisted investor addresses.
     ///
-    /// Reads the allowlist index and filters by live `InvestorAllowlisted` status
-    /// so revoked addresses never appear in the result.
+    /// Reads the paged allowlist index ([`DataKey::AllowlistPage`]) and filters by
+    /// live `InvestorAllowlisted` status so revoked addresses never appear in the
+    /// result. The index length is read in `O(1)` from [`DataKey::AllowlistCount`].
     ///
     /// # Arguments
     /// * `start` - The starting index (0-based) of the pagination.
@@ -6092,22 +6229,25 @@ impl StarfundEscrow {
     /// # Returns
     /// A `Vec<Address>` containing the allowlisted addresses within the requested page.
     pub fn get_allowlisted_investors(env: Env, start: u32, limit: u32) -> Vec<Address> {
-        let index: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistIndex)
-            .unwrap_or_else(|| Vec::new(&env));
+        let len = Self::allowlist_index_len(&env);
 
         let (start, end) =
-            match Self::paginate_window(start, limit, MAX_INVESTOR_READ_BATCH, index.len()) {
+            match Self::paginate_window(start, limit, MAX_INVESTOR_READ_BATCH, len) {
                 Some(w) => w,
                 None => return Vec::new(&env),
             };
 
         let mut result = Vec::new(&env);
         for i in start..end {
-            let addr = index.get(i).unwrap();
-            // Only include addresses that are still allowlisted
+            let page = i / ALLOWLIST_PAGE_SIZE;
+            let offset = i % ALLOWLIST_PAGE_SIZE;
+            let addr = match Self::allowlist_page(&env, page).get(offset) {
+                Some(addr) => addr,
+                None => continue,
+            };
+            // Only include addresses that are still allowlisted. Revokes are removed
+            // from the index, so this is a defensive re-check (INV-AL-05) that also
+            // filters entries whose persistent flag has been archived.
             let is_al: bool = env
                 .storage()
                 .persistent()
@@ -6122,28 +6262,10 @@ impl StarfundEscrow {
 
     /// Returns the total number of currently-allowlisted addresses.
     ///
-    /// Reads the allowlist index and counts entries where the live
-    /// `InvestorAllowlisted` flag is still `true`.
+    /// `O(1)`: reads the maintained [`DataKey::AllowlistCount`] counter instead of
+    /// scanning the index and issuing one persistent read per address.
     pub fn get_allowlisted_investors_count(env: Env) -> u32 {
-        let index: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::AllowlistIndex)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut count: u32 = 0;
-        for i in 0..index.len() {
-            let addr = index.get(i).unwrap();
-            let is_al: bool = env
-                .storage()
-                .persistent()
-                .get(&DataKey::InvestorAllowlisted(addr.clone()))
-                .unwrap_or(false);
-            if is_al {
-                count += 1;
-            }
-        }
-        count
+        Self::allowlist_index_len(&env)
     }
 
     /// Convenience alias for [`StarfundEscrow::set_legal_hold`] with `active = false`.
