@@ -33,6 +33,8 @@ The contract maintains the following invariants regarding the beneficiary:
 - **Reject No-Op Rotations:** Rotation to the same address currently configured as the beneficiary is rejected with error code 162 (`NewSmeSameAsCurrent`).
 - **Maturity & State Gates:** Rotation is only permitted before the invoice escrow is settled, withdrawn, or cancelled. The `status` must be either `0` (open) or `1` (funded). Otherwise, the call is rejected with error code 161 (`RotationNotOpen`).
 - **Legal Hold Lockout:** If a compliance/legal hold is active, any attempt to rotate the beneficiary is blocked immediately with error code 160 (`LegalHoldBlocksBeneficiaryRotation`).
+- **Operational Pause Lockout:** While any operational pause is active (regardless of its scope), rotation is blocked with error code 183 (`PausedBlocksBeneficiaryRotation`).
+- **Dispute Lockout:** While a dispute is active, rotation is blocked with error code 184 (`DisputeBlocksBeneficiaryRotation`).
 
 ### 2. Disbursement Destination
 - **Disbursement Routing:** The `withdraw` entrypoint sends the net funded amount (gross funded amount minus the protocol fee) exclusively to the stored `sme_address` at the time of the withdrawal. Once status is transitioned to `3` (withdrawn), the funds are dispersed and the state is terminal.

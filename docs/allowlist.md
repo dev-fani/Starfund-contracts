@@ -33,11 +33,18 @@ so archived or never-added entries cannot be exploited to bypass the gate.
 | Key | Storage | Type | Multiplicity | Default |
 | --- | --- | --- | --- | --- |
 | `DataKey::AllowlistActive` | instance | `bool` | singleton | `false` (absent) |
-| `DataKey::AllowlistIndex` | instance | `Vec<Address>` | singleton | `[]` (absent) |
+| `DataKey::AllowlistCount` | instance | `u32` | singleton | `0` (absent) |
+| `DataKey::AllowlistPage(u32)` | persistent | `Vec<Address>` | one per page (`ALLOWLIST_PAGE_SIZE` = 50 addresses) | `[]` (absent) |
 | `DataKey::InvestorAllowlisted(Address)` | persistent | `bool` | one per investor | `false` (absent) |
 
-`AllowlistActive` and `AllowlistIndex` live in **instance storage** so
-they share the contract's TTL. Reads on the funding path are cheap.
+`AllowlistActive` and the `AllowlistCount` length counter live in **instance
+storage** so they share the contract's TTL. Reads on the funding path are cheap,
+and `get_allowlisted_investors_count` is `O(1)`.
+
+The allowlist index is split into fixed-size **persistent** pages
+(`AllowlistPage`) so no single ledger entry — and no instance slot — holds an
+unbounded address collection. `DataKey::AllowlistIndex` is the legacy
+single-vector layout and is no longer written.
 
 Per-address flags live in **persistent storage** with independent TTLs per
 address. This is intentional: it lets the allowlist scale to thousands of

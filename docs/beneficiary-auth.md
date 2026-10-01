@@ -33,7 +33,7 @@ All authorization in the contract uses **Soroban `Address::require_auth()`**, wh
 
 | Entrypoint | Authorized Role | Allowed States | Legal Hold Gate | Pause Gate | Auth Mechanism |
 |------------|----------------|----------------|----------------|------------|----------------|
-| `rotate_beneficiary` | **SME + Admin** (both) | Open (0), Funded (1) | Blocks with `LegalHoldBlocksBeneficiaryRotation` (160) | None | `sme_address.require_auth()` + `admin.require_auth()` |
+| `rotate_beneficiary` | **SME + Admin** (both) | Open (0), Funded (1) | Blocks with `LegalHoldBlocksBeneficiaryRotation` (160) | Blocks with `PausedBlocksBeneficiaryRotation` (183, any pause scope) | `sme_address.require_auth()` + `admin.require_auth()` |
 | `withdraw` | **SME** | Funded (1) | Blocks with `LegalHoldBlocksWithdrawal` (123) | Blocks with `PausedBlocksWithdrawal` (212) | `load_escrow_require_sme` → `sme_address.require_auth()` |
 | `settle` | **SME** | Funded (1) | Blocks with `LegalHoldBlocksSettlement` (120) | Blocks with `PausedBlocksSettlement` (211) | `load_escrow_require_sme` → `sme_address.require_auth()` |
 | `partial_settle` | **SME OR Admin** | Open (0) | Blocks with `LegalHoldBlocksPartialSettle` (201) | None | `caller.require_auth()` + `ensure(caller == sme_address \|\| caller == admin)` |
@@ -113,6 +113,8 @@ Every beneficiary-related rejection in the contract uses typed `EscrowError` var
 | Code | Variant | Trigger | Entrypoint(s) |
 |------|---------|---------|---------------|
 | 160 | `LegalHoldBlocksBeneficiaryRotation` | Legal hold is active | `rotate_beneficiary` |
+| 183 | `PausedBlocksBeneficiaryRotation` | An operational pause is active (any scope) | `rotate_beneficiary` |
+| 184 | `DisputeBlocksBeneficiaryRotation` | A dispute is active | `rotate_beneficiary` |
 | 161 | `RotationNotOpen` | Status is not 0 or 1 (pre-settlement) | `rotate_beneficiary` |
 | 162 | `NewSmeSameAsCurrent` | `new_sme_address` equals the current beneficiary | `rotate_beneficiary` |
 | 120 | `LegalHoldBlocksSettlement` | Legal hold is active | `settle` |

@@ -40,21 +40,29 @@ Both must sign in the same transaction. This prevents unilateral redirection of 
    - Condition: `!legal_hold_active`
    - If `LegalHold` is active, the call aborts immediately.
 
-2. **State gate (allowed states only)**
+2. **Operational-pause gate (read-only)**
+   - Condition: no active operational pause (any scope).
+   - If a pause is active, the call aborts with `PausedBlocksBeneficiaryRotation` (183).
+
+3. **Dispute gate (read-only)**
+   - Condition: `!is_dispute_active`.
+   - If a dispute is active, the call aborts with `DisputeBlocksBeneficiaryRotation` (184).
+
+4. **State gate (allowed states only)**
    - Condition: `escrow.status == 0 || escrow.status == 1`
    - Meaning:
      - `0` = **open** (pre-settlement)
      - `1` = **funded** (still pre-settlement)
 
-3. **No-op guard**
+5. **No-op guard**
    - Condition: `new_sme_address != escrow.sme_address`
    - Rotating to the current address is rejected.
 
-4. **Dual authorization**
+6. **Dual authorization**
    - `escrow.sme_address.require_auth()`
    - `escrow.admin.require_auth()`
 
-5. **Storage write + event emission**
+7. **Storage write + event emission**
    - Persists the updated `sme_address` into `DataKey::Escrow`.
    - Emits `BeneficiaryRotated`.
 
@@ -82,6 +90,14 @@ These are the typed `EscrowError` variants emitted by `rotate_beneficiary`:
 - **`LegalHoldBlocksBeneficiaryRotation` (160)**
   - Trigger: legal hold is active.
   - Meaning: compliance/legal hold blocks beneficiary rotation.
+
+- **`PausedBlocksBeneficiaryRotation` (183)**
+  - Trigger: an operational pause is active (any scope).
+  - Meaning: the escrow is frozen; administrative rotations are blocked.
+
+- **`DisputeBlocksBeneficiaryRotation` (184)**
+  - Trigger: a dispute is active.
+  - Meaning: the payout destination cannot be redirected while disputed.
 
 - **`RotationNotOpen` (161)**
   - Trigger: escrow is not in a pre-settlement state.
