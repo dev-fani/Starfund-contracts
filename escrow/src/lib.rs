@@ -4798,7 +4798,7 @@ impl StarfundEscrow {
     /// Retrieve the currently recorded SME collateral commitment metadata from storage.
     /// Returns `None` if no commitment has been recorded yet.
     pub fn get_sme_collateral_commitment(env: Env) -> Option<SmeCollateralCommitment> {
-        env.storage().instance().get(&DataKey::SmeCollateralPledge)
+        env.storage().instance().get(&keys::collateral_pledge_key())
     }
 
     /// Retire the recorded SME collateral pledge.
@@ -4813,14 +4813,14 @@ impl StarfundEscrow {
         let commitment: SmeCollateralCommitment = env
             .storage()
             .instance()
-            .get(&DataKey::SmeCollateralPledge)
+            .get(&keys::collateral_pledge_key())
             .unwrap_or_else(|| fail(&env, EscrowError::NoCollateralToClear));
 
         let escrow = Self::load_escrow_require_sme(&env);
 
         env.storage()
             .instance()
-            .remove(&DataKey::SmeCollateralPledge);
+            .remove(&keys::collateral_pledge_key());
 
         CollateralClearedEvt {
             name: symbol_short!("coll_clr"),
@@ -5393,7 +5393,7 @@ impl StarfundEscrow {
 
         let now = env.ledger().timestamp();
         let prior: Option<SmeCollateralCommitment> =
-            env.storage().instance().get(&DataKey::SmeCollateralPledge);
+            env.storage().instance().get(&keys::collateral_pledge_key());
         let prior_amount = prior.as_ref().map(|c| c.amount).unwrap_or(0);
 
         if let Some(ref existing) = prior {
@@ -5411,7 +5411,7 @@ impl StarfundEscrow {
         };
         env.storage()
             .instance()
-            .set(&DataKey::SmeCollateralPledge, &commitment);
+            .set(&keys::collateral_pledge_key(), &commitment);
 
         CollateralRecordedEvt {
             name: symbol_short!("coll_rec"),
@@ -5478,7 +5478,7 @@ impl StarfundEscrow {
         // Only the first item needs this check; subsequent items in the same
         // batch share `now` as their `recorded_at`, so `now >= now` always holds.
         let prior: Option<SmeCollateralCommitment> =
-            env.storage().instance().get(&DataKey::SmeCollateralPledge);
+            env.storage().instance().get(&keys::collateral_pledge_key());
         if let Some(ref existing) = prior {
             ensure(
                 &env,
@@ -5510,7 +5510,7 @@ impl StarfundEscrow {
 
             env.storage()
                 .instance()
-                .set(&DataKey::SmeCollateralPledge, &last_commitment);
+                .set(&keys::collateral_pledge_key(), &last_commitment);
 
             CollateralRecordedEvt {
                 name: symbol_short!("coll_rec"),
