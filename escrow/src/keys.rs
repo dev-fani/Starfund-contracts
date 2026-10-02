@@ -10,8 +10,9 @@
 //!
 //! ## Collateral keys
 //!
-//! The collateral pledge key family is managed by [`collateral_pledge_key`]. All three
-//! collateral entrypoints (`record_sme_collateral_commitment`, `clear_sme_collateral_commitment`,
+//! The collateral pledge key family is managed by [`collateral_pledge_key`]. The
+//! collateral entrypoints (`record_sme_collateral_commitment`,
+//! `record_sme_collateral_commitment_batch`, `clear_sme_collateral_commitment`,
 //! `get_sme_collateral_commitment`) call this function instead of constructing
 //! `DataKey::SmeCollateralPledge` inline. This ensures any future rename or split of the
 //! collateral key cannot diverge across call sites.
@@ -111,4 +112,27 @@ pub(crate) fn callback_context(nonce: u64) -> DataKey {
 /// Instance-storage running total of principal released to the SME via [`StarfundEscrow::release`].
 pub(crate) fn released_amount() -> DataKey {
     DataKey::ReleasedAmount
+}
+
+/// Instance-storage SME collateral pledge commitment metadata.
+///
+/// Single source of truth for the collateral key family: the record, clear, and
+/// read entrypoints (`record_sme_collateral_commitment`,
+/// `record_sme_collateral_commitment_batch`, `clear_sme_collateral_commitment`,
+/// `get_sme_collateral_commitment`) all resolve the key through this helper.
+pub(crate) fn collateral_pledge_key() -> DataKey {
+    DataKey::SmeCollateralPledge
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collateral_pledge_key_matches_data_key_variant() {
+        assert!(matches!(
+            collateral_pledge_key(),
+            DataKey::SmeCollateralPledge
+        ));
+    }
 }

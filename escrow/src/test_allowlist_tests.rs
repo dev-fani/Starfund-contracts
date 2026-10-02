@@ -32,6 +32,10 @@ fn init(env: &Env, client: &StarfundEscrowClient) -> (Address, Address) {
         &None,
         &None,
         &None,
+        &None,
+        &None,
+        &None::<i64>,
+        &None::<u32>,
     );
     (admin, sme)
 }
