@@ -66,41 +66,58 @@ components:
 
     InvoiceEscrow:
       type: object
+      description: |
+        Mirror of the `InvoiceEscrow` struct stored on chain in
+        `escrow/src/lib.rs`. Field names and types match the contract struct.
       required:
         - invoice_id
+        - admin
         - sme_address
-        - buyer_address
+        - payer
         - amount
         - funding_target
         - funded_amount
         - yield_bps
         - maturity
         - status
-        - is_paid
+        - dispute_active
       properties:
         invoice_id:
           $ref: "#/components/schemas/InvoiceId"
+        admin:
+          allOf:
+            - $ref: "#/components/schemas/StellarAddress"
+          description: "Escrow administrator (contract `admin: Address`)."
         sme_address:
           $ref: "#/components/schemas/StellarAddress"
-        buyer_address:
-          $ref: "#/components/schemas/StellarAddress"
+        payer:
+          allOf:
+            - $ref: "#/components/schemas/StellarAddress"
+          description: |
+            Address that authorized escrow creation and must authorize funding
+            (contract `payer: Address`). Distinct from `sme_address`, which
+            receives payouts.
         amount:
           type: integer
-          format: int64
           minimum: 1
-          description: Total invoice amount in stroops.
+          description: |
+            Total invoice amount in stroops. Contract type is `i128`, so values
+            may exceed the int64 range; values are transported as JSON numbers
+            and must be handled as 128-bit integers by clients.
           example: 100000000000
         funding_target:
           type: integer
-          format: int64
           minimum: 1
-          description: Funding target in stroops (equals `amount` at init).
+          description: |
+            Funding target in stroops (equals `amount` at init). Contract type
+            is `i128`.
           example: 100000000000
         funded_amount:
           type: integer
-          format: int64
           minimum: 0
-          description: Total investor contributions received so far, in stroops.
+          description: |
+            Total investor contributions received so far, in stroops. Contract
+            type is `i128`.
           example: 50000000000
         yield_bps:
           type: integer
@@ -117,9 +134,12 @@ components:
           example: 1000
         status:
           $ref: "#/components/schemas/EscrowStatus"
-        is_paid:
+        dispute_active:
           type: boolean
-          description: Whether the buyer has confirmed payment (repayment of invoice).
+          description: |
+            Whether a dispute is currently open on this escrow (contract
+            `dispute_active: bool`). An active dispute blocks SME withdrawal and
+            escrow closure.
           example: false
 
     InvoiceSummary:
@@ -749,7 +769,8 @@ paths:
       summary: Settle an escrow
       description: |
         Marks the escrow as settled via `StarfundEscrow.settle`.
-        Requires status `1` (funded) AND explicit buyer confirmation (`is_paid` = true).
+        Requires status `1` (funded); reverts while a dispute is active or a legal
+        hold is set.
         Transitions to status `2` (settled), releasing principal + yield to investors.
       tags: [Escrow]
       parameters:
