@@ -74,15 +74,19 @@ function assertInvalid(schemaRef, data) {
 // 56-char Stellar G-address (base32 A-Z2-7)
 const VALID_ADDRESS = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
+// Mirrors the `InvoiceEscrow` struct in `escrow/src/lib.rs`.
 const validEscrow = {
   invoice_id: "INV-1023",
+  admin: VALID_ADDRESS,
   sme_address: VALID_ADDRESS,
+  payer: VALID_ADDRESS,
   amount: 100_000_000_000,
   funding_target: 100_000_000_000,
   funded_amount: 0,
   yield_bps: 800,
   maturity: 1000,
   status: 0,
+  dispute_active: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -181,6 +185,43 @@ describe("InvoiceEscrow schema", () => {
     assertInvalid(ref, rest);
   });
 
+  it("rejects missing admin", () => {
+    const { admin, ...rest } = validEscrow;
+    assertInvalid(ref, rest);
+  });
+
+  it("rejects missing payer", () => {
+    const { payer, ...rest } = validEscrow;
+    assertInvalid(ref, rest);
+  });
+
+  it("rejects missing dispute_active", () => {
+    const { dispute_active, ...rest } = validEscrow;
+    assertInvalid(ref, rest);
+  });
+
+  it("accepts an escrow with an active dispute", () => {
+    assertValid(ref, { ...validEscrow, dispute_active: true });
+  });
+
+  it("rejects non-boolean dispute_active", () => {
+    assertInvalid(ref, { ...validEscrow, dispute_active: "yes" });
+  });
+
+  it("rejects invalid payer format", () => {
+    assertInvalid(ref, { ...validEscrow, payer: "not-an-address" });
+  });
+
+  it("rejects invalid admin format", () => {
+    assertInvalid(ref, { ...validEscrow, admin: "not-an-address" });
+  });
+
+  it("accepts amounts above the int64 range (contract i128)", () => {
+    // 1e19 > 2^63 - 1 and far beyond Number.MAX_SAFE_INTEGER, while still
+    // inside i128: the schema must not constrain these fields to int64.
+    assertValid(ref, { ...validEscrow, amount: 1e19, funding_target: 1e19 });
+  });
+
   it("rejects amount = 0", () => {
     assertInvalid(ref, { ...validEscrow, amount: 0 });
   });
@@ -236,6 +277,7 @@ describe("InitEscrowRequest schema", () => {
   const valid = {
     invoice_id: "INV-1023",
     sme_address: VALID_ADDRESS,
+    buyer_address: VALID_ADDRESS,
     amount: 100_000_000_000,
     yield_bps: 800,
     maturity: 1000,
@@ -245,6 +287,11 @@ describe("InitEscrowRequest schema", () => {
 
   it("rejects missing sme_address", () => {
     const { sme_address, ...rest } = valid;
+    assertInvalid(ref, rest);
+  });
+
+  it("rejects missing buyer_address", () => {
+    const { buyer_address, ...rest } = valid;
     assertInvalid(ref, rest);
   });
 

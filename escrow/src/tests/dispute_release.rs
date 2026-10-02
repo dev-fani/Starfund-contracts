@@ -1,15 +1,26 @@
 use super::*;
 
+/// Builds an escrow that is fully funded to its `funding_target`, so `status == 1`
+/// (Funded). `withdraw()` requires `EscrowStatus::Funded`; withdrawing while the
+/// escrow is still open (status 0) reverts with `WithdrawalNotFunded`.
+///
+/// A real Stellar Asset Contract is used because `withdraw()` transfers the
+/// released principal to the SME and therefore needs an actual token balance on
+/// the contract.
 fn funded_client() -> (Env, StarfundEscrowClient<'static>, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    let token = sac.address();
+    let sac_admin = StellarAssetClient::new(&env, &token);
+
     let (client, admin, sme) = setup(&env);
-    let (token, treasury) = free_addresses(&env);
+    let (_, treasury) = free_addresses(&env);
     client.init(
         &admin,
         &String::from_str(&env, "DISPUTE001"),
         &sme,
-        &1000i128,
+        &100_000_000_000i128,
         &100i64,
         &0u64,
         &token,
@@ -27,7 +38,10 @@ fn funded_client() -> (Env, StarfundEscrowClient<'static>, Address, Address) {
         &None::<u32>,
     );
     let investor = Address::generate(&env);
-    client.fund(&investor, &900i128);
+    sac_admin.mint(&investor, &100_000_000_000i128);
+    // Funding the full `funding_target` moves the escrow to status 1 (Funded).
+    client.fund(&investor, &100_000_000_000i128);
+    sac_admin.mint(&client.address, &100_000_000_000i128);
     (env, client, admin, sme)
 }
 
@@ -35,11 +49,54 @@ fn funded_client() -> (Env, StarfundEscrowClient<'static>, Address, Address) {
 fn release_before_dispute_succeeds() {
     let (_, client, _, _) = funded_client();
     let before = client.get_escrow();
-    assert_eq!(before.status, 0);
+    // `withdraw()` is gated on `EscrowStatus::Funded`; asserting status 1 here
+    // documents the precondition the release path depends on.
+    assert_eq!(before.status, 1);
+    assert!(!before.dispute_active);
 
     let released = client.withdraw();
     assert_eq!(released.status, 3);
     assert!(!client.is_dispute_active());
+}
+
+#[test]
+fn release_before_funding_is_rejected() {
+    // Status 0 (open) is not withdrawable: `withdraw()` requires status 1.
+    let env = Env::default();
+    env.mock_all_auths();
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    let token = sac.address();
+    let sac_admin = StellarAssetClient::new(&env, &token);
+    let (client, admin, sme) = setup(&env);
+    let (_, treasury) = free_addresses(&env);
+    client.init(
+        &admin,
+        &String::from_str(&env, "DISPUTE000"),
+        &sme,
+        &100_000_000_000i128,
+        &100i64,
+        &0u64,
+        &token,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None::<i64>,
+        &None::<u32>,
+    );
+    let investor = Address::generate(&env);
+    sac_admin.mint(&investor, &90_000_000_000i128);
+    client.fund(&investor, &90_000_000_000i128);
+    assert_eq!(client.get_escrow().status, 0);
+
+    let result = client.try_withdraw();
+    assert_contract_error(result, EscrowError::WithdrawalNotFunded);
 }
 
 #[test]
